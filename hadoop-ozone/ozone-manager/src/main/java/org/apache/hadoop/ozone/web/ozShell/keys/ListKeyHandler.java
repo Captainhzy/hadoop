@@ -18,20 +18,18 @@
 
 package org.apache.hadoop.ozone.web.ozShell.keys;
 
-import java.net.URI;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 
 import org.apache.hadoop.ozone.client.OzoneBucket;
-import org.apache.hadoop.ozone.client.OzoneClientException;
+import org.apache.hadoop.ozone.client.OzoneClient;
 import org.apache.hadoop.ozone.client.OzoneClientUtils;
 import org.apache.hadoop.ozone.client.OzoneKey;
 import org.apache.hadoop.ozone.client.OzoneVolume;
 import org.apache.hadoop.ozone.client.rest.response.KeyInfo;
 import org.apache.hadoop.ozone.web.ozShell.Handler;
+import org.apache.hadoop.ozone.web.ozShell.OzoneAddress;
 import org.apache.hadoop.ozone.web.ozShell.Shell;
 import org.apache.hadoop.ozone.web.utils.JsonUtils;
 
@@ -42,23 +40,24 @@ import picocli.CommandLine.Parameters;
 /**
  * Executes List Keys.
  */
-@Command(name = "-listKey",
+@Command(name = "list",
+    aliases = "ls",
     description = "list all keys in a given bucket")
 public class ListKeyHandler extends Handler {
 
   @Parameters(arity = "1..1", description = Shell.OZONE_BUCKET_URI_DESCRIPTION)
   private String uri;
 
-  @Option(names = {"--length", "-length", "-l"},
+  @Option(names = {"--length", "-l"},
       description = "Limit of the max results",
       defaultValue = "100")
   private int maxKeys;
 
-  @Option(names = {"--start", "-start", "-s"},
+  @Option(names = {"--start", "-s"},
       description = "The first key to start the listing")
   private String startKey;
 
-  @Option(names = {"--prefix", "-prefix", "-p"},
+  @Option(names = {"--prefix", "-p"},
       description = "Prefix to filter the key")
   private String prefix;
 
@@ -68,20 +67,17 @@ public class ListKeyHandler extends Handler {
   @Override
   public Void call() throws Exception {
 
-    URI ozoneURI = verifyURI(uri);
-    Path path = Paths.get(ozoneURI.getPath());
-    if (path.getNameCount() < 2) {
-      throw new OzoneClientException(
-          "volume/bucket is required in listKey");
-    }
+    OzoneAddress address = new OzoneAddress(uri);
+    address.ensureBucketAddress();
+    OzoneClient client = address.createClient(createOzoneConfiguration());
+
+    String volumeName = address.getVolumeName();
+    String bucketName = address.getBucketName();
 
     if (maxKeys < 1) {
       throw new IllegalArgumentException(
           "the length should be a positive number");
     }
-
-    String volumeName = path.getName(0).toString();
-    String bucketName = path.getName(1).toString();
 
     if (isVerbose()) {
       System.out.printf("Volume Name : %s%n", volumeName);
@@ -90,13 +86,21 @@ public class ListKeyHandler extends Handler {
 
     OzoneVolume vol = client.getObjectStore().getVolume(volumeName);
     OzoneBucket bucket = vol.getBucket(bucketName);
-    Iterator<OzoneKey> keyIterator = bucket.listKeys(prefix, startKey);
+    Iterator<? extends OzoneKey> keyIterator = bucket.listKeys(prefix,
+        startKey);
     List<KeyInfo> keyInfos = new ArrayList<>();
 
+    int maxKeyLimit = maxKeys;
     while (maxKeys > 0 && keyIterator.hasNext()) {
       KeyInfo key = OzoneClientUtils.asKeyInfo(keyIterator.next());
       keyInfos.add(key);
       maxKeys -= 1;
+    }
+
+    // More keys were returned notify about max length
+    if (keyIterator.hasNext()) {
+      System.out.println("Listing first " + maxKeyLimit + " entries of the " +
+          "result. Use --length (-l) to override max returned keys.");
     }
 
     if (isVerbose()) {

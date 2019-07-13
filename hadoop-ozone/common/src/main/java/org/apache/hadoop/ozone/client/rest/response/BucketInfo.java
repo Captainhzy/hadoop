@@ -21,7 +21,7 @@ import java.io.IOException;
 import java.util.LinkedList;
 import java.util.List;
 
-import org.apache.hadoop.fs.StorageType;
+import org.apache.hadoop.hdds.protocol.StorageType;
 import org.apache.hadoop.ozone.OzoneAcl;
 import org.apache.hadoop.ozone.OzoneConsts;
 
@@ -44,6 +44,7 @@ public class BucketInfo implements Comparable<BucketInfo> {
   private List<OzoneAcl> acls;
   private OzoneConsts.Versioning versioning;
   private StorageType storageType;
+  private String bekName;
 
   /**
    * Constructor for BucketInfo.
@@ -182,6 +183,22 @@ public class BucketInfo implements Comparable<BucketInfo> {
    */
   public void setVolumeName(String volumeName) {
     this.volumeName = volumeName;
+  }
+
+  /**
+   * Return bucket encryption key name.
+   * @return bucket encryption key name
+   */
+  public String getEncryptionKeyName() {
+    return bekName;
+  }
+
+  /**
+   * Sets the bucket encryption key name.
+   * @param name bucket encryption key name
+   */
+  public void setEncryptionKeyName(String name) {
+    this.bekName = name;
   }
 
   /**

@@ -18,12 +18,11 @@
 
 package org.apache.hadoop.ozone.web.ozShell.volume;
 
-import java.net.URI;
-
-import org.apache.hadoop.ozone.client.OzoneClientException;
+import org.apache.hadoop.ozone.client.OzoneClient;
 import org.apache.hadoop.ozone.client.OzoneClientUtils;
 import org.apache.hadoop.ozone.client.OzoneVolume;
 import org.apache.hadoop.ozone.web.ozShell.Handler;
+import org.apache.hadoop.ozone.web.ozShell.OzoneAddress;
 import org.apache.hadoop.ozone.web.ozShell.Shell;
 import org.apache.hadoop.ozone.web.utils.JsonUtils;
 
@@ -33,7 +32,7 @@ import picocli.CommandLine.Parameters;
 /**
  * Executes volume Info calls.
  */
-@Command(name = "-infoVolume",
+@Command(name = "info",
     description = "returns information about a specific volume")
 public class InfoVolumeHandler extends Handler{
 
@@ -46,14 +45,11 @@ public class InfoVolumeHandler extends Handler{
   @Override
   public Void call() throws Exception {
 
-    URI ozoneURI = verifyURI(uri);
-    if (ozoneURI.getPath().isEmpty()) {
-      throw new OzoneClientException(
-          "Volume name is required to get info of a volume");
-    }
+    OzoneAddress address = new OzoneAddress(uri);
+    address.ensureVolumeAddress();
+    OzoneClient client = address.createClient(createOzoneConfiguration());
 
-    // we need to skip the slash in the URI path
-    String volumeName = ozoneURI.getPath().substring(1);
+    String volumeName = address.getVolumeName();
 
     OzoneVolume vol = client.getObjectStore().getVolume(volumeName);
     System.out.printf("%s%n", JsonUtils.toJsonStringWithDefaultPrettyPrinter(

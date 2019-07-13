@@ -27,7 +27,7 @@ import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.LinkedList;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 import java.util.stream.Collectors;
@@ -97,14 +97,15 @@ public abstract class SCMCommonPolicy implements ContainerPlacementPolicy {
    *
    *
    * @param excludedNodes - datanodes with existing replicas
+   * @param favoredNodes - list of nodes preferred.
    * @param nodesRequired - number of datanodes required.
    * @param sizeRequired - size required for the container or block.
    * @return list of datanodes chosen.
    * @throws SCMException SCM exception.
    */
-
+  @Override
   public List<DatanodeDetails> chooseDatanodes(
-      List<DatanodeDetails> excludedNodes,
+      List<DatanodeDetails> excludedNodes, List<DatanodeDetails> favoredNodes,
       int nodesRequired, final long sizeRequired) throws SCMException {
     List<DatanodeDetails> healthyNodes =
         nodeManager.getNodes(HddsProtos.NodeState.HEALTHY);
@@ -137,7 +138,6 @@ public abstract class SCMCommonPolicy implements ContainerPlacementPolicy {
       throw new SCMException(msg,
           SCMException.ResultCodes.FAILED_TO_FIND_NODES_WITH_SPACE);
     }
-
     return healthyList;
   }
 
@@ -147,11 +147,11 @@ public abstract class SCMCommonPolicy implements ContainerPlacementPolicy {
    * @param datanodeDetails DatanodeDetails
    * @return true if we have enough space.
    */
-  private boolean hasEnoughSpace(DatanodeDetails datanodeDetails,
-                                 long sizeRequired) {
+  boolean hasEnoughSpace(DatanodeDetails datanodeDetails,
+      long sizeRequired) {
     SCMNodeMetric nodeMetric = nodeManager.getNodeStat(datanodeDetails);
-    return (nodeMetric != null) && nodeMetric.get().getRemaining()
-        .hasResources(sizeRequired);
+    return (nodeMetric != null) && (nodeMetric.get() != null)
+        && nodeMetric.get().getRemaining().hasResources(sizeRequired);
   }
 
   /**
@@ -167,7 +167,7 @@ public abstract class SCMCommonPolicy implements ContainerPlacementPolicy {
   public List<DatanodeDetails> getResultSet(
       int nodesRequired, List<DatanodeDetails> healthyNodes)
       throws SCMException {
-    List<DatanodeDetails> results = new LinkedList<>();
+    List<DatanodeDetails> results = new ArrayList<>();
     for (int x = 0; x < nodesRequired; x++) {
       // invoke the choose function defined in the derived classes.
       DatanodeDetails nodeId = chooseNode(healthyNodes);
@@ -196,6 +196,4 @@ public abstract class SCMCommonPolicy implements ContainerPlacementPolicy {
    */
   public abstract DatanodeDetails chooseNode(
       List<DatanodeDetails> healthyNodes);
-
-
 }

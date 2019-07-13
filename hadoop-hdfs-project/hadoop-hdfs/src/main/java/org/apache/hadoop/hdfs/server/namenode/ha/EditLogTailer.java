@@ -53,8 +53,6 @@ import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocol;
 import org.apache.hadoop.ipc.RPC;
-import org.apache.hadoop.ipc.RemoteException;
-import org.apache.hadoop.ipc.StandbyException;
 import org.apache.hadoop.security.SecurityUtil;
 
 import static org.apache.hadoop.util.Time.monotonicNow;
@@ -113,6 +111,11 @@ public class EditLogTailer {
   private long lastLoadTimeMs;
 
   /**
+   * The last time we triggered a edit log roll on active namenode.
+   */
+  private long lastRollTimeMs;
+
+  /**
    * How often the Standby should roll edit logs. Since the Standby only reads
    * from finalized log segments, the Standby will only be as up-to-date as how
    * often the logs are rolled.
@@ -142,12 +145,17 @@ public class EditLogTailer {
   private int nnLoopCount = 0;
 
   /**
-   * maximum number of retries we should give each of the remote namenodes before giving up
+   * Maximum number of retries we should give each of the remote namenodes
+   * before giving up.
    */
   private int maxRetries;
 
   /**
-   * Whether the tailer should tail the in-progress edit log segments.
+   * Whether the tailer should tail the in-progress edit log segments. If true,
+   * this will also attempt to optimize for latency when tailing the edit logs
+   * (if using the
+   * {@link org.apache.hadoop.hdfs.qjournal.client.QuorumJournalManager}, this
+   * implies using the RPC-based mechanism to tail edits).
    */
   private final boolean inProgressOk;
 
@@ -164,10 +172,12 @@ public class EditLogTailer {
     this.editLog = namesystem.getEditLog();
     
     lastLoadTimeMs = monotonicNow();
+    lastRollTimeMs = monotonicNow();
 
     logRollPeriodMs = conf.getTimeDuration(
         DFSConfigKeys.DFS_HA_LOGROLL_PERIOD_KEY,
-        DFSConfigKeys.DFS_HA_LOGROLL_PERIOD_DEFAULT, TimeUnit.SECONDS) * 1000;
+        DFSConfigKeys.DFS_HA_LOGROLL_PERIOD_DEFAULT,
+        TimeUnit.SECONDS, TimeUnit.MILLISECONDS);
     List<RemoteNameNodeInfo> nns = Collections.emptyList();
     if (logRollPeriodMs >= 0) {
       try {
@@ -194,11 +204,13 @@ public class EditLogTailer {
     
     sleepTimeMs = conf.getTimeDuration(
         DFSConfigKeys.DFS_HA_TAILEDITS_PERIOD_KEY,
-        DFSConfigKeys.DFS_HA_TAILEDITS_PERIOD_DEFAULT, TimeUnit.SECONDS) * 1000;
+        DFSConfigKeys.DFS_HA_TAILEDITS_PERIOD_DEFAULT,
+        TimeUnit.SECONDS, TimeUnit.MILLISECONDS);
 
-    rollEditsTimeoutMs = conf.getInt(
+    rollEditsTimeoutMs = conf.getTimeDuration(
         DFSConfigKeys.DFS_HA_TAILEDITS_ROLLEDITS_TIMEOUT_KEY,
-        DFSConfigKeys.DFS_HA_TAILEDITS_ROLLEDITS_TIMEOUT_DEFAULT) * 1000;
+        DFSConfigKeys.DFS_HA_TAILEDITS_ROLLEDITS_TIMEOUT_DEFAULT,
+        TimeUnit.SECONDS, TimeUnit.MILLISECONDS);
 
     rollEditsRpcExecutor = Executors.newSingleThreadExecutor(
         new ThreadFactoryBuilder().setDaemon(true).build());
@@ -279,7 +291,7 @@ public class EditLogTailer {
   }
   
   @VisibleForTesting
-  void doTailEdits() throws IOException, InterruptedException {
+  public void doTailEdits() throws IOException, InterruptedException {
     // Write lock needs to be interruptible here because the 
     // transitionToActive RPC takes the write lock before calling
     // tailer.stop() -- so if we're not interruptible, it will
@@ -352,7 +364,7 @@ public class EditLogTailer {
    */
   private boolean tooLongSinceLastLoad() {
     return logRollPeriodMs >= 0 && 
-      (monotonicNow() - lastLoadTimeMs) > logRollPeriodMs ;
+      (monotonicNow() - lastRollTimeMs) > logRollPeriodMs;
   }
 
   /**
@@ -380,17 +392,9 @@ public class EditLogTailer {
     try {
       future = rollEditsRpcExecutor.submit(getNameNodeProxy());
       future.get(rollEditsTimeoutMs, TimeUnit.MILLISECONDS);
+      lastRollTimeMs = monotonicNow();
       lastRollTriggerTxId = lastLoadedTxnId;
     } catch (ExecutionException e) {
-      Throwable cause = e.getCause();
-      if (cause instanceof RemoteException) {
-        IOException ioe = ((RemoteException) cause).unwrapRemoteException();
-        if (ioe instanceof StandbyException) {
-          LOG.info("Skipping log roll. Remote node is not in Active state: " +
-              ioe.getMessage().split("\n")[0]);
-          return;
-        }
-      }
       LOG.warn("Unable to trigger a roll of the active NN", e);
     } catch (TimeoutException e) {
       if (future != null) {
@@ -479,7 +483,7 @@ public class EditLogTailer {
         try {
           Thread.sleep(sleepTimeMs);
         } catch (InterruptedException e) {
-          LOG.warn("Edit log tailer interrupted", e);
+          LOG.warn("Edit log tailer interrupted: {}", e.getMessage());
         }
       }
     }
@@ -497,7 +501,8 @@ public class EditLogTailer {
    * This mechanism is <b>very bad</b> for cases where we care about being <i>fast</i>; it just
    * blindly goes and tries namenodes.
    */
-  private abstract class MultipleNameNodeProxy<T> implements Callable<T> {
+  @VisibleForTesting
+  abstract class MultipleNameNodeProxy<T> implements Callable<T> {
 
     /**
      * Do the actual work to the remote namenode via the {@link #cachedActiveProxy}.
@@ -513,19 +518,13 @@ public class EditLogTailer {
         try {
           T ret = doWork();
           return ret;
-        } catch (RemoteException e) {
-          Throwable cause = e.unwrapRemoteException(StandbyException.class);
-          // if its not a standby exception, then we need to re-throw it, something bad has happened
-          if (cause == e) {
-            throw e;
-          } else {
-            // it is a standby exception, so we try the other NN
-            LOG.warn("Failed to reach remote node: " + currentNN
-                + ", retrying with remaining remote NNs");
-            cachedActiveProxy = null;
-            // this NN isn't responding to requests, try the next one
-            nnLoopCount++;
-          }
+        } catch (IOException e) {
+          LOG.warn("Exception from remote name node " + currentNN
+              + ", try next.", e);
+
+          // Try next name node if exception happens.
+          cachedActiveProxy = null;
+          nnLoopCount++;
         }
       }
       throw new IOException("Cannot find any valid remote NN to service request!");

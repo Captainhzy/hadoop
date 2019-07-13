@@ -19,14 +19,13 @@
 package org.apache.hadoop.ozone.container.keyvalue.helpers;
 
 import com.google.common.base.Preconditions;
-import org.apache.commons.codec.binary.Hex;
-import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos
     .ContainerCommandRequestProto;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos
     .ContainerCommandResponseProto;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos
     .ReadChunkResponseProto;
+import org.apache.hadoop.hdds.scm.ByteStringHelper;
 import org.apache.hadoop.hdds.scm.container.common.helpers
     .StorageContainerException;
 import org.apache.hadoop.io.IOUtils;
@@ -35,7 +34,6 @@ import org.apache.hadoop.ozone.container.common.helpers.ChunkInfo;
 import org.apache.hadoop.ozone.container.common.helpers.ContainerUtils;
 import org.apache.hadoop.ozone.container.keyvalue.KeyValueContainerData;
 import org.apache.hadoop.ozone.container.keyvalue.impl.ChunkManagerImpl;
-import org.apache.ratis.shaded.com.google.protobuf.ByteString;
 import org.apache.hadoop.ozone.container.common.volume.VolumeIOStats;
 import org.apache.hadoop.util.Time;
 import org.slf4j.Logger;
@@ -45,9 +43,9 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.AsynchronousFileChannel;
+import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.file.StandardOpenOption;
-import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.concurrent.ExecutionException;
 
@@ -70,49 +68,46 @@ public final class ChunkUtils {
    * @param chunkInfo - Data stream to write.
    * @param data - The data buffer.
    * @param volumeIOStats
+   * @param sync whether to do fsync or not
    * @throws StorageContainerException
    */
   public static void writeData(File chunkFile, ChunkInfo chunkInfo,
-                               byte[] data, VolumeIOStats volumeIOStats) throws
-      StorageContainerException, ExecutionException, InterruptedException,
-      NoSuchAlgorithmException {
-
+      ByteBuffer data, VolumeIOStats volumeIOStats, boolean sync)
+      throws StorageContainerException, ExecutionException,
+      InterruptedException, NoSuchAlgorithmException {
+    int bufferSize = data.capacity();
     Logger log = LoggerFactory.getLogger(ChunkManagerImpl.class);
-    if (data.length != chunkInfo.getLen()) {
+    if (bufferSize != chunkInfo.getLen()) {
       String err = String.format("data array does not match the length " +
               "specified. DataLen: %d Byte Array: %d",
-          chunkInfo.getLen(), data.length);
+          chunkInfo.getLen(), bufferSize);
       log.error(err);
       throw new StorageContainerException(err, INVALID_WRITE_SIZE);
     }
 
-    AsynchronousFileChannel file = null;
+    FileChannel file = null;
     FileLock lock = null;
 
     try {
-      if (chunkInfo.getChecksum() != null &&
-          !chunkInfo.getChecksum().isEmpty()) {
-        verifyChecksum(chunkInfo, data, log);
-      }
-
       long writeTimeStart = Time.monotonicNow();
-      file =
-          AsynchronousFileChannel.open(chunkFile.toPath(),
+
+      // skip SYNC and DSYNC to reduce contention on file.lock
+      file = FileChannel.open(chunkFile.toPath(),
               StandardOpenOption.CREATE,
               StandardOpenOption.WRITE,
-              StandardOpenOption.SPARSE,
-              StandardOpenOption.SYNC);
-      lock = file.lock().get();
-      int size = file.write(ByteBuffer.wrap(data), chunkInfo.getOffset()).get();
+              StandardOpenOption.SPARSE);
+
+      lock = file.lock();
+      int size = file.write(data, chunkInfo.getOffset());
       // Increment volumeIO stats here.
       volumeIOStats.incWriteTime(Time.monotonicNow() - writeTimeStart);
       volumeIOStats.incWriteOpCount();
       volumeIOStats.incWriteBytes(size);
-      if (size != data.length) {
+      if (size != bufferSize) {
         log.error("Invalid write size found. Size:{}  Expected: {} ", size,
-            data.length);
+            bufferSize);
         throw new StorageContainerException("Invalid write size found. " +
-            "Size: " + size + " Expected: " + data.length, INVALID_WRITE_SIZE);
+            "Size: " + size + " Expected: " + bufferSize, INVALID_WRITE_SIZE);
       }
     } catch (StorageContainerException ex) {
       throw ex;
@@ -131,6 +126,10 @@ public final class ChunkUtils {
       }
       if (file != null) {
         try {
+          if (sync) {
+            // ensure data and metadata is persisted. Outside the lock
+            file.force(true);
+          }
           file.close();
         } catch (IOException e) {
           throw new StorageContainerException("Error closing chunk file",
@@ -138,6 +137,8 @@ public final class ChunkUtils {
         }
       }
     }
+    log.debug("Write Chunk completed for chunkFile: {}, size {}", chunkFile,
+        bufferSize);
   }
 
   /**
@@ -152,10 +153,8 @@ public final class ChunkUtils {
    * @throws InterruptedException
    */
   public static ByteBuffer readData(File chunkFile, ChunkInfo data,
-                                    VolumeIOStats volumeIOStats)
-      throws
-      StorageContainerException, ExecutionException, InterruptedException,
-      NoSuchAlgorithmException {
+      VolumeIOStats volumeIOStats) throws StorageContainerException,
+      ExecutionException, InterruptedException {
     Logger log = LoggerFactory.getLogger(ChunkManagerImpl.class);
 
     if (!chunkFile.exists()) {
@@ -182,9 +181,7 @@ public final class ChunkUtils {
       volumeIOStats.incReadTime(Time.monotonicNow() - readStartTime);
       volumeIOStats.incReadOpCount();
       volumeIOStats.incReadBytes(data.getLen());
-      if (data.getChecksum() != null && !data.getChecksum().isEmpty()) {
-        verifyChecksum(data, buf.array(), log);
-      }
+
       return buf;
     } catch (IOException e) {
       throw new StorageContainerException(e, IO_EXCEPTION);
@@ -203,49 +200,23 @@ public final class ChunkUtils {
   }
 
   /**
-   * Verifies the checksum of a chunk against the data buffer.
-   *
-   * @param chunkInfo - Chunk Info.
-   * @param data - data buffer
-   * @param log - log
-   * @throws NoSuchAlgorithmException
-   * @throws StorageContainerException
-   */
-  private static void verifyChecksum(ChunkInfo chunkInfo, byte[] data, Logger
-      log) throws NoSuchAlgorithmException, StorageContainerException {
-    MessageDigest sha = MessageDigest.getInstance(OzoneConsts.FILE_HASH);
-    sha.update(data);
-    if (!Hex.encodeHexString(sha.digest()).equals(
-        chunkInfo.getChecksum())) {
-      log.error("Checksum mismatch. Provided: {} , computed: {}",
-          chunkInfo.getChecksum(), DigestUtils.sha256Hex(sha.digest()));
-      throw new StorageContainerException("Checksum mismatch. Provided: " +
-          chunkInfo.getChecksum() + " , computed: " +
-          DigestUtils.sha256Hex(sha.digest()), CHECKSUM_MISMATCH);
-    }
-  }
-
-  /**
    * Validates chunk data and returns a file object to Chunk File that we are
    * expected to write data to.
    *
    * @param chunkFile - chunkFile to write data into.
    * @param info - chunk info.
-   * @return boolean isOverwrite
-   * @throws StorageContainerException
+   * @return true if the chunkFile exists and chunkOffset &lt; chunkFile length,
+   *         false otherwise.
    */
   public static boolean validateChunkForOverwrite(File chunkFile,
-      ChunkInfo info) throws StorageContainerException {
+      ChunkInfo info) {
 
     Logger log = LoggerFactory.getLogger(ChunkManagerImpl.class);
 
     if (isOverWriteRequested(chunkFile, info)) {
       if (!isOverWritePermitted(info)) {
-        log.error("Rejecting write chunk request. Chunk overwrite " +
+        log.warn("Duplicate write chunk request. Chunk overwrite " +
             "without explicit request. {}", info.toString());
-        throw new StorageContainerException("Rejecting write chunk request. " +
-            "OverWrite flag required." + info.toString(),
-            OVERWRITE_FLAG_REQUIRED);
       }
       return true;
     }
@@ -346,7 +317,8 @@ public final class ChunkUtils {
     ReadChunkResponseProto.Builder response =
         ReadChunkResponseProto.newBuilder();
     response.setChunkData(info.getProtoBufMessage());
-    response.setData(ByteString.copyFrom(data));
+    response.setData(
+        ByteStringHelper.getByteString(data));
     response.setBlockID(msg.getReadChunk().getBlockID());
 
     ContainerCommandResponseProto.Builder builder =

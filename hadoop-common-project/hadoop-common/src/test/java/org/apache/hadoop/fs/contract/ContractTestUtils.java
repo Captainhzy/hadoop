@@ -29,7 +29,7 @@ import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.fs.StreamCapabilities;
 import org.apache.hadoop.io.IOUtils;
 import org.junit.Assert;
-import org.junit.internal.AssumptionViolatedException;
+import org.junit.AssumptionViolatedException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -187,8 +187,11 @@ public class ContractTestUtils extends Assert {
           (short) 1,
           buffersize);
     }
-    out.write(src, 0, len);
-    out.close();
+    try {
+      out.write(src, 0, len);
+    } finally {
+      out.close();
+    }
     assertFileHasLength(fs, path, len);
   }
 
@@ -454,8 +457,10 @@ public class ContractTestUtils extends Assert {
   public static FileStatus[] deleteChildren(FileSystem fileSystem,
       Path path,
       boolean recursive) throws IOException {
+    LOG.debug("Deleting children of {} (recursive={})", path, recursive);
     FileStatus[] children = listChildren(fileSystem, path);
     for (FileStatus entry : children) {
+      LOG.debug("Deleting {}", entry);
       fileSystem.delete(entry.getPath(), recursive);
     }
     return children;
@@ -1022,6 +1027,18 @@ public class ContractTestUtils extends Assert {
   }
 
   /**
+   * Execute {@link FileSystem#mkdirs(Path)}; expect {@code true} back.
+   * (Note: does not work for localFS if the directory already exists)
+   * Does not perform any validation of the created directory.
+   * @param fs filesystem
+   * @param dir directory to create
+   * @throws IOException IO Problem
+   */
+  public static void assertMkdirs(FileSystem fs, Path dir) throws IOException {
+    assertTrue("mkdirs(" + dir + ") returned false", fs.mkdirs(dir));
+  }
+
+  /**
    * Test for the host being an OSX machine.
    * @return true if the JVM thinks that is running on OSX
    */
@@ -1466,6 +1483,37 @@ public class ContractTestUtils extends Assert {
       }
     }
   }
+
+  /**
+   * Function which calls {@code InputStream.read()} and
+   * downgrades an IOE to a runtime exception.
+   * @param in input
+   * @return the read value
+   * @throws AssertionError on any IOException
+   */
+  public static int read(InputStream in) {
+    try {
+      return in.read();
+    } catch (IOException ex) {
+      throw new AssertionError(ex);
+    }
+  }
+
+  /**
+   * Read a whole stream; downgrades an IOE to a runtime exception.
+   * @param in input
+   * @return the number of bytes read.
+   * @throws AssertionError on any IOException
+   */
+  public static long readStream(InputStream in) {
+    long count = 0;
+
+    while (read(in) >= 0) {
+      count++;
+    }
+    return count;
+  }
+
 
   /**
    * Results of recursive directory creation/scan operations.

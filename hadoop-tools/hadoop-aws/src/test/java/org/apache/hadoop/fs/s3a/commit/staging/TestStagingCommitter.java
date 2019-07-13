@@ -117,10 +117,10 @@ public class TestStagingCommitter extends StagingTestBase.MiniDFSTest {
 
   /**
    * Test array for parameterized test runs: how many threads and
-   * how many files to use.
+   * whether or not filenames are unique.
    * @return a list of parameter tuples.
    */
-  @Parameterized.Parameters
+  @Parameterized.Parameters(name="threads-{0}-unique-{1}")
   public static Collection<Object[]> params() {
     return Arrays.asList(new Object[][] {
         {0, false},
@@ -157,7 +157,7 @@ public class TestStagingCommitter extends StagingTestBase.MiniDFSTest {
     this.tac = new TaskAttemptContextImpl(
         new Configuration(job.getConfiguration()), AID);
 
-    this.jobCommitter = new MockedStagingCommitter(OUTPUT_PATH, tac);
+    this.jobCommitter = new MockedStagingCommitter(outputPath, tac);
     jobCommitter.setupJob(job);
 
     // get the task's configuration copy so modifications take effect
@@ -172,7 +172,7 @@ public class TestStagingCommitter extends StagingTestBase.MiniDFSTest {
     this.conf.set(BUFFER_DIR,
         String.format("%s/local-0/, %s/local-1 ", tmp, tmp));
 
-    this.committer = new MockedStagingCommitter(OUTPUT_PATH, tac);
+    this.committer = new MockedStagingCommitter(outputPath, tac);
     Paths.resetTempFolderCache();
   }
 
@@ -608,7 +608,7 @@ public class TestStagingCommitter extends StagingTestBase.MiniDFSTest {
       TaskAttemptContext attempt = new TaskAttemptContextImpl(
           new Configuration(jobContext.getConfiguration()), attemptID);
       MockedStagingCommitter taskCommitter = new MockedStagingCommitter(
-          OUTPUT_PATH, attempt);
+          outputPath, attempt);
       commitTask(taskCommitter, attempt, numFiles);
     }
 

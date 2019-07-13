@@ -18,28 +18,29 @@
 
 package org.apache.hadoop.ozone.web.ozShell.volume;
 
-import com.google.common.base.Strings;
-import picocli.CommandLine.Command;
-import picocli.CommandLine.Option;
-import picocli.CommandLine.Parameters;
-
-import org.apache.hadoop.ozone.client.OzoneClientUtils;
-import org.apache.hadoop.ozone.client.OzoneVolume;
-import org.apache.hadoop.ozone.client.rest.response.VolumeInfo;
-import org.apache.hadoop.ozone.client.OzoneClientException;
-import org.apache.hadoop.ozone.web.ozShell.Handler;
-import org.apache.hadoop.ozone.web.ozShell.Shell;
-import org.apache.hadoop.ozone.web.utils.JsonUtils;
-
-import java.net.URI;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 
+import org.apache.hadoop.ozone.client.OzoneClient;
+import org.apache.hadoop.ozone.client.OzoneClientUtils;
+import org.apache.hadoop.ozone.client.OzoneVolume;
+import org.apache.hadoop.ozone.client.rest.response.VolumeInfo;
+import org.apache.hadoop.ozone.web.ozShell.Handler;
+import org.apache.hadoop.ozone.web.ozShell.OzoneAddress;
+import org.apache.hadoop.ozone.web.ozShell.Shell;
+import org.apache.hadoop.ozone.web.utils.JsonUtils;
+
+import org.apache.hadoop.security.UserGroupInformation;
+import picocli.CommandLine.Command;
+import picocli.CommandLine.Option;
+import picocli.CommandLine.Parameters;
+
 /**
  * Executes List Volume call.
  */
-@Command(name = "-listVolume",
+@Command(name = "list",
+    aliases = "ls",
     description = "List the volumes of a given user")
 public class ListVolumeHandler extends Handler {
 
@@ -48,20 +49,20 @@ public class ListVolumeHandler extends Handler {
       defaultValue = "/")
   private String uri;
 
-  @Option(names = {"--length", "-length", "-l"},
+  @Option(names = {"--length", "-l"},
       description = "Limit of the max results",
       defaultValue = "100")
   private int maxVolumes;
 
-  @Option(names = {"--start", "-start", "-s"},
+  @Option(names = {"--start", "-s"},
       description = "The first volume to start the listing")
   private String startVolume;
 
-  @Option(names = {"--prefix", "-prefix", "-p"},
+  @Option(names = {"--prefix", "-p"},
       description = "Prefix to filter the volumes")
   private String prefix;
 
-  @Option(names = {"--user", "-user", "-u"},
+  @Option(names = {"--user", "-u"},
       description = "Owner of the volumes to list.")
   private String userName;
 
@@ -71,16 +72,12 @@ public class ListVolumeHandler extends Handler {
   @Override
   public Void call() throws Exception {
 
-    URI ozoneURI = verifyURI(uri);
-    if (!Strings.isNullOrEmpty(ozoneURI.getPath()) && !ozoneURI.getPath()
-        .equals("/")) {
-      throw new OzoneClientException(
-          "Invalid URI: " + ozoneURI + " . Specified path not used." + ozoneURI
-              .getPath());
-    }
+    OzoneAddress address = new OzoneAddress(uri);
+    address.ensureRootAddress();
+    OzoneClient client = address.createClient(createOzoneConfiguration());
 
     if (userName == null) {
-      userName = System.getProperty("user.name");
+      userName = UserGroupInformation.getCurrentUser().getUserName();
     }
 
     if (maxVolumes < 1) {
@@ -88,7 +85,7 @@ public class ListVolumeHandler extends Handler {
           "the length should be a positive number");
     }
 
-    Iterator<OzoneVolume> volumeIterator;
+    Iterator<? extends OzoneVolume> volumeIterator;
     if(userName != null) {
       volumeIterator = client.getObjectStore()
           .listVolumesByUser(userName, prefix, startVolume);

@@ -21,6 +21,10 @@ import org.apache.hadoop.conf.TestConfigurationFieldsBase;
 import org.apache.hadoop.hdds.HddsConfigKeys;
 import org.apache.hadoop.ozone.om.OMConfigKeys;
 import org.apache.hadoop.hdds.scm.ScmConfigKeys;
+import org.apache.hadoop.ozone.recon.ReconServerConfigKeys;
+import org.apache.hadoop.ozone.s3.S3GatewayConfigKeys;
+
+import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_ACL_AUTHORIZER_CLASS_NATIVE;
 
 /**
  * Tests if configuration constants documented in ozone-defaults.xml.
@@ -29,12 +33,26 @@ public class TestOzoneConfigurationFields extends TestConfigurationFieldsBase {
 
   @Override
   public void initializeMemberVariables() {
-    xmlFilename = new String("ozone-default.xml");
+    xmlFilename = "ozone-default.xml";
     configurationClasses =
         new Class[] {OzoneConfigKeys.class, ScmConfigKeys.class,
-            OMConfigKeys.class, HddsConfigKeys.class};
+            OMConfigKeys.class, HddsConfigKeys.class,
+            ReconServerConfigKeys.class,
+            S3GatewayConfigKeys.class};
     errorIfMissingConfigProps = true;
     errorIfMissingXmlProps = true;
     xmlPropsToSkipCompare.add("hadoop.tags.custom");
+    xmlPropsToSkipCompare.add("ozone.om.nodes.EXAMPLEOMSERVICEID");
+    addPropertiesNotInXml();
+  }
+
+  private void addPropertiesNotInXml() {
+    configurationPropsToSkipCompare.add(HddsConfigKeys.HDDS_KEY_ALGORITHM);
+    configurationPropsToSkipCompare.add(HddsConfigKeys.HDDS_SECURITY_PROVIDER);
+    configurationPropsToSkipCompare.add(HddsConfigKeys.HDDS_GRPC_TLS_TEST_CERT);
+    configurationPropsToSkipCompare.add(OMConfigKeys.OZONE_OM_NODES_KEY);
+    configurationPropsToSkipCompare.add(OZONE_ACL_AUTHORIZER_CLASS_NATIVE);
+    configurationPropsToSkipCompare.add(OzoneConfigKeys.
+        OZONE_S3_TOKEN_MAX_LIFETIME_KEY);
   }
 }

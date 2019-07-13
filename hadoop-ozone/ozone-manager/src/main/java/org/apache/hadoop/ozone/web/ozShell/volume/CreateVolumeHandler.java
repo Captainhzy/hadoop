@@ -18,41 +18,40 @@
 
 package org.apache.hadoop.ozone.web.ozShell.volume;
 
+import org.apache.hadoop.ozone.client.OzoneClient;
+import org.apache.hadoop.ozone.client.OzoneClientUtils;
+import org.apache.hadoop.ozone.client.OzoneVolume;
+import org.apache.hadoop.ozone.client.VolumeArgs;
+import org.apache.hadoop.ozone.web.ozShell.Handler;
+import org.apache.hadoop.ozone.web.ozShell.OzoneAddress;
+import org.apache.hadoop.ozone.web.ozShell.Shell;
+import org.apache.hadoop.ozone.web.utils.JsonUtils;
+import org.apache.hadoop.security.UserGroupInformation;
+
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 import picocli.CommandLine.Parameters;
 
-import org.apache.hadoop.ozone.client.OzoneClientUtils;
-import org.apache.hadoop.ozone.client.OzoneVolume;
-import org.apache.hadoop.ozone.client.VolumeArgs;
-import org.apache.hadoop.ozone.client.OzoneClientException;
-import org.apache.hadoop.ozone.web.ozShell.Handler;
-import org.apache.hadoop.ozone.web.ozShell.Shell;
-import org.apache.hadoop.ozone.web.utils.JsonUtils;
-
-import java.net.URI;
-
 /**
  * Executes the create volume call for the shell.
  */
-@Command(name = "-createVolume",
+@Command(name = "create",
     description = "Creates a volume for the specified user")
 public class CreateVolumeHandler extends Handler {
 
   @Parameters(arity = "1..1", description = Shell.OZONE_VOLUME_URI_DESCRIPTION)
   private String uri;
 
-  @Option(names = {"--user", "-user"},
-      description = "Owner of of the volume", required =
-      true)
+  @Option(names = {"--user", "-u"},
+      description = "Owner of of the volume")
   private String userName;
 
-  @Option(names = {"--quota", "-quota"},
+  @Option(names = {"--quota", "-q"},
       description =
           "Quota of the newly created volume (eg. 1G)")
   private String quota;
 
-  @Option(names = {"--root", "-root"},
+  @Option(names = {"--root"},
       description = "Development flag to execute the "
           + "command as the admin (hdfs) user.")
   private boolean root;
@@ -62,16 +61,15 @@ public class CreateVolumeHandler extends Handler {
    */
   @Override
   public Void call() throws Exception {
-
-    URI ozoneURI = verifyURI(uri);
-
-    // we need to skip the slash in the URI path
-    // getPath returns /volumeName needs to remove the initial slash.
-    String volumeName = ozoneURI.getPath().replaceAll("^/+", "");
-    if (volumeName.isEmpty()) {
-      throw new OzoneClientException(
-          "Volume name is required to create a volume");
+    if(userName == null) {
+      userName = UserGroupInformation.getCurrentUser().getUserName();
     }
+
+    OzoneAddress address = new OzoneAddress(uri);
+    address.ensureVolumeAddress();
+    OzoneClient client = address.createClient(createOzoneConfiguration());
+
+    String volumeName = address.getVolumeName();
 
     if (isVerbose()) {
       System.out.printf("Volume name : %s%n", volumeName);
@@ -81,7 +79,7 @@ public class CreateVolumeHandler extends Handler {
     if (root) {
       rootName = "hdfs";
     } else {
-      rootName = System.getProperty("user.name");
+      rootName = UserGroupInformation.getCurrentUser().getShortUserName();
     }
 
     VolumeArgs.Builder volumeArgsBuilder = VolumeArgs.newBuilder()

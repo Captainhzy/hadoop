@@ -146,8 +146,8 @@ public class NetUtils {
 
   /**
    * Util method to build socket addr from either:
-   *   <host>:<port>
-   *   <fs>://<host>:<port>/<path>
+   *   {@literal <host>:<port>}
+   *   {@literal <fs>://<host>:<port>/<path>}
    */
   public static InetSocketAddress createSocketAddr(String target) {
     return createSocketAddr(target, -1);
@@ -155,9 +155,9 @@ public class NetUtils {
 
   /**
    * Util method to build socket addr from either:
-   *   <host>
-   *   <host>:<port>
-   *   <fs>://<host>:<port>/<path>
+   *   {@literal <host>}
+   *   {@literal <host>:<port>}
+   *   {@literal <fs>://<host>:<port>/<path>}
    */
   public static InetSocketAddress createSocketAddr(String target,
                                                    int defaultPort) {
@@ -288,8 +288,10 @@ public class NetUtils {
     if (fqHost == null) {
       try {
         fqHost = SecurityUtil.getByName(host).getHostName();
-        // slight race condition, but won't hurt
         canonicalizedHostCache.putIfAbsent(host, fqHost);
+        // ensures that we won't return a canonicalized stale (non-cached)
+        // host name for a given host
+        fqHost = canonicalizedHostCache.get(host);
       } catch (UnknownHostException e) {
         fqHost = host;
       }
@@ -831,7 +833,7 @@ public class NetUtils {
       Throwable t = ctor.newInstance(msg);
       return (T)(t.initCause(exception));
     } catch (Throwable e) {
-      LOG.warn("Unable to wrap exception of type {}: it has no (String) "
+      LOG.trace("Unable to wrap exception of type {}: it has no (String) "
           + "constructor", clazz, e);
       throw exception;
     }
@@ -850,8 +852,8 @@ public class NetUtils {
     StringBuilder hostDetails = new StringBuilder(27);
     hostDetails.append("local host is: ")
         .append(quoteHost(localHost))
-        .append("; ");
-    hostDetails.append("destination host is: ").append(quoteHost(destHost))
+        .append("; ")
+        .append("destination host is: ").append(quoteHost(destHost))
         .append(":")
         .append(destPort).append("; ");
     return hostDetails.toString();
@@ -938,7 +940,7 @@ public class NetUtils {
    * Return a free port number. There is no guarantee it will remain free, so
    * it should be used immediately.
    *
-   * @returns A free port for binding a local socket
+   * @return A free port for binding a local socket
    */
   public static int getFreeSocketPort() {
     int port = 0;
@@ -959,7 +961,7 @@ public class NetUtils {
    *
    * @param localAddr
    * @param bindWildCardAddress
-   * @returns InetAddress
+   * @return InetAddress
    */
   public static InetAddress bindToLocalAddress(InetAddress localAddr, boolean
       bindWildCardAddress) {

@@ -17,19 +17,17 @@
  */
 package org.apache.hadoop.ozone.web.ozShell.bucket;
 
-import java.net.URI;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
 
 import org.apache.hadoop.ozone.OzoneAcl;
 import org.apache.hadoop.ozone.client.OzoneBucket;
-import org.apache.hadoop.ozone.client.OzoneClientException;
+import org.apache.hadoop.ozone.client.OzoneClient;
 import org.apache.hadoop.ozone.client.OzoneClientUtils;
 import org.apache.hadoop.ozone.client.OzoneVolume;
 import org.apache.hadoop.ozone.web.ozShell.Handler;
+import org.apache.hadoop.ozone.web.ozShell.OzoneAddress;
 import org.apache.hadoop.ozone.web.ozShell.Shell;
 import org.apache.hadoop.ozone.web.utils.JsonUtils;
 
@@ -40,19 +38,19 @@ import picocli.CommandLine.Parameters;
 /**
  * Allows users to add and remove acls and from a bucket.
  */
-@Command(name = "-updateBucket",
+@Command(name = "update",
     description = "allows changing bucket attributes")
 public class UpdateBucketHandler extends Handler {
 
   @Parameters(arity = "1..1", description = Shell.OZONE_BUCKET_URI_DESCRIPTION)
   private String uri;
 
-  @Option(names = {"--addAcl", "-addAcl"},
+  @Option(names = {"--addAcl"},
       description = "Comma separated list of acl rules to add (eg. " +
           "user:bilbo:rw)")
   private String addAcl;
 
-  @Option(names = {"--removeAcl", "-removeAcl"},
+  @Option(names = {"--removeAcl"},
       description = "Comma separated list of acl rules to remove (eg. "
           + "user:bilbo:rw)")
   private String removeAcl;
@@ -60,16 +58,12 @@ public class UpdateBucketHandler extends Handler {
   @Override
   public Void call() throws Exception {
 
-    URI ozoneURI = verifyURI(uri);
-    Path path = Paths.get(ozoneURI.getPath());
+    OzoneAddress address = new OzoneAddress(uri);
+    address.ensureBucketAddress();
+    OzoneClient client = address.createClient(createOzoneConfiguration());
 
-    if (path.getNameCount() < 2) {
-      throw new OzoneClientException(
-          "volume and bucket name required in update bucket");
-    }
-
-    String volumeName = path.getName(0).toString();
-    String bucketName = path.getName(1).toString();
+    String volumeName = address.getVolumeName();
+    String bucketName = address.getBucketName();
 
     if (isVerbose()) {
       System.out.printf("Volume Name : %s%n", volumeName);

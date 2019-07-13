@@ -349,11 +349,12 @@ public class PBHelperClient {
   }
 
   public static TokenProto convert(Token<?> tok) {
-    return TokenProto.newBuilder().
+    TokenProto.Builder builder = TokenProto.newBuilder().
         setIdentifier(getByteString(tok.getIdentifier())).
         setPassword(getByteString(tok.getPassword())).
         setKindBytes(getFixedByteString(tok.getKind())).
-        setServiceBytes(getFixedByteString(tok.getService())).build();
+        setServiceBytes(getFixedByteString(tok.getService()));
+    return builder.build();
   }
 
   public static ShortCircuitShmIdProto convert(ShmId shmId) {
@@ -774,6 +775,11 @@ public class PBHelperClient {
     for (String storageId : blockTokenSecret.getStorageIds()) {
       builder.addStorageIds(storageId);
     }
+
+    byte[] handshake = blockTokenSecret.getHandshakeMsg();
+    if (handshake != null && handshake.length > 0) {
+      builder.setHandshakeSecret(getByteString(handshake));
+    }
     return builder.build();
   }
 
@@ -826,9 +832,11 @@ public class PBHelperClient {
 
   public static Token<BlockTokenIdentifier> convert(
       TokenProto blockToken) {
-    return new Token<>(blockToken.getIdentifier()
+    Token<BlockTokenIdentifier> token =
+        new Token<>(blockToken.getIdentifier()
         .toByteArray(), blockToken.getPassword().toByteArray(), new Text(
         blockToken.getKind()), new Text(blockToken.getService()));
+    return token;
   }
 
   // DatanodeId
@@ -908,18 +916,22 @@ public class PBHelperClient {
         case EVENT_CREATE:
           InotifyProtos.CreateEventProto create =
               InotifyProtos.CreateEventProto.parseFrom(p.getContents());
-          events.add(new Event.CreateEvent.Builder()
-              .iNodeType(createTypeConvert(create.getType()))
-              .path(create.getPath())
-              .ctime(create.getCtime())
-              .ownerName(create.getOwnerName())
-              .groupName(create.getGroupName())
-              .perms(convert(create.getPerms()))
-              .replication(create.getReplication())
-              .symlinkTarget(create.getSymlinkTarget().isEmpty() ? null :
-                  create.getSymlinkTarget())
-              .defaultBlockSize(create.getDefaultBlockSize())
-              .overwrite(create.getOverwrite()).build());
+          Event.CreateEvent.Builder builder = new Event.CreateEvent.Builder()
+                  .iNodeType(createTypeConvert(create.getType()))
+                  .path(create.getPath())
+                  .ctime(create.getCtime())
+                  .ownerName(create.getOwnerName())
+                  .groupName(create.getGroupName())
+                  .perms(convert(create.getPerms()))
+                  .replication(create.getReplication())
+                  .symlinkTarget(create.getSymlinkTarget().isEmpty() ? null :
+                          create.getSymlinkTarget())
+                  .defaultBlockSize(create.getDefaultBlockSize())
+                  .overwrite(create.getOverwrite());
+          if (create.hasErasureCoded()) {
+            builder.erasureCoded(create.getErasureCoded());
+          }
+          events.add(builder.build());
           break;
         case EVENT_METADATA:
           InotifyProtos.MetadataUpdateEventProto meta =
@@ -2251,7 +2263,7 @@ public class PBHelperClient {
 
   public static FsServerDefaultsProto convert(FsServerDefaults fs) {
     if (fs == null) return null;
-    return FsServerDefaultsProto.newBuilder().
+    FsServerDefaultsProto.Builder builder = FsServerDefaultsProto.newBuilder().
         setBlockSize(fs.getBlockSize()).
         setBytesPerChecksum(fs.getBytesPerChecksum()).
         setWritePacketSize(fs.getWritePacketSize())
@@ -2260,9 +2272,11 @@ public class PBHelperClient {
         .setEncryptDataTransfer(fs.getEncryptDataTransfer())
         .setTrashInterval(fs.getTrashInterval())
         .setChecksumType(convert(fs.getChecksumType()))
-        .setKeyProviderUri(fs.getKeyProviderUri())
-        .setPolicyId(fs.getDefaultStoragePolicyId())
-        .build();
+        .setPolicyId(fs.getDefaultStoragePolicyId());
+    if (fs.getKeyProviderUri() != null) {
+      builder.setKeyProviderUri(fs.getKeyProviderUri());
+    }
+    return builder.build();
   }
 
   public static EnumSetWritable<CreateFlag> convertCreateFlag(int flag) {
@@ -2909,22 +2923,26 @@ public class PBHelperClient {
           break;
         case CREATE:
           Event.CreateEvent ce2 = (Event.CreateEvent) e;
+          InotifyProtos.CreateEventProto.Builder pB =
+                  (InotifyProtos.CreateEventProto.newBuilder());
+          pB.setType(createTypeConvert(ce2.getiNodeType()))
+             .setPath(ce2.getPath())
+             .setCtime(ce2.getCtime())
+             .setOwnerName(ce2.getOwnerName())
+             .setGroupName(ce2.getGroupName())
+             .setPerms(convert(ce2.getPerms()))
+             .setReplication(ce2.getReplication())
+             .setSymlinkTarget(ce2.getSymlinkTarget() == null ?
+                        "" : ce2.getSymlinkTarget())
+             .setDefaultBlockSize(ce2.getDefaultBlockSize())
+             .setOverwrite(ce2.getOverwrite());
+          if (ce2.isErasureCoded().isPresent()) {
+            pB.setErasureCoded(ce2.isErasureCoded().get());
+          }
           events.add(InotifyProtos.EventProto.newBuilder()
               .setType(InotifyProtos.EventType.EVENT_CREATE)
-              .setContents(
-                  InotifyProtos.CreateEventProto.newBuilder()
-                      .setType(createTypeConvert(ce2.getiNodeType()))
-                      .setPath(ce2.getPath())
-                      .setCtime(ce2.getCtime())
-                      .setOwnerName(ce2.getOwnerName())
-                      .setGroupName(ce2.getGroupName())
-                      .setPerms(convert(ce2.getPerms()))
-                      .setReplication(ce2.getReplication())
-                      .setSymlinkTarget(ce2.getSymlinkTarget() == null ?
-                          "" : ce2.getSymlinkTarget())
-                      .setDefaultBlockSize(ce2.getDefaultBlockSize())
-                      .setOverwrite(ce2.getOverwrite()).build().toByteString()
-              ).build());
+              .setContents(pB.build().toByteString())
+              .build());
           break;
         case METADATA:
           Event.MetadataUpdateEvent me = (Event.MetadataUpdateEvent) e;

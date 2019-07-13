@@ -19,10 +19,17 @@
 package org.apache.hadoop.ozone.web.storage;
 
 import com.google.common.base.Strings;
+import org.apache.hadoop.conf.StorageUnit;
+import org.apache.hadoop.hdds.client.ReplicationType;
+import org.apache.hadoop.hdds.scm.ByteStringHelper;
 import org.apache.hadoop.hdds.scm.client.HddsClientUtils;
+import org.apache.hadoop.hdds.scm.protocol.StorageContainerLocationProtocol;
 import org.apache.hadoop.io.IOUtils;
-import org.apache.hadoop.io.retry.RetryPolicy;
-import org.apache.hadoop.ozone.client.OzoneClientUtils;
+import org.apache.hadoop.ozone.OzoneConfigKeys;
+import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos
+    .ChecksumType;
+import org.apache.hadoop.ozone.client.io.KeyInputStream;
+import org.apache.hadoop.ozone.client.io.KeyOutputStream;
 import org.apache.hadoop.ozone.client.io.LengthInputStream;
 import org.apache.hadoop.ozone.om.helpers.OmBucketArgs;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
@@ -30,23 +37,20 @@ import org.apache.hadoop.ozone.om.helpers.OmKeyArgs;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.OmVolumeArgs;
 import org.apache.hadoop.ozone.om.helpers.OpenKeySession;
-import org.apache.hadoop.ozone.om.protocolPB.OzoneManagerProtocolClientSideTranslatorPB;
+import org.apache.hadoop.ozone.om.protocol.OzoneManagerProtocol;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
-import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.ozone.OzoneConsts.Versioning;
-import org.apache.hadoop.ozone.client.io.ChunkGroupInputStream;
-import org.apache.hadoop.ozone.client.io.ChunkGroupOutputStream;
 import org.apache.hadoop.ozone.client.io.OzoneOutputStream;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos;
 import org.apache.hadoop.ozone.protocolPB.OMPBHelper;
-import org.apache.hadoop.ozone.om.OMConfigKeys;
 import org.apache.hadoop.ozone.OzoneAcl;
+import org.apache.hadoop.ozone.security.acl.IAccessAuthorizer.ACLIdentityType;
+import org.apache.hadoop.ozone.security.acl.IAccessAuthorizer.ACLType;
+import org.apache.hadoop.ozone.security.acl.OzoneAclConfig;
 import org.apache.hadoop.ozone.web.request.OzoneQuota;
 import org.apache.hadoop.hdds.scm.ScmConfigKeys;
 import org.apache.hadoop.hdds.scm.XceiverClientManager;
-import org.apache.hadoop.hdds.scm.protocolPB
-    .StorageContainerLocationProtocolClientSideTranslatorPB;
 import org.apache.hadoop.ozone.client.rest.OzoneException;
 import org.apache.hadoop.ozone.web.handlers.BucketArgs;
 import org.apache.hadoop.ozone.web.handlers.KeyArgs;
@@ -55,13 +59,17 @@ import org.apache.hadoop.ozone.web.handlers.VolumeArgs;
 import org.apache.hadoop.ozone.web.handlers.UserArgs;
 import org.apache.hadoop.ozone.web.interfaces.StorageHandler;
 import org.apache.hadoop.ozone.web.response.*;
+import org.apache.hadoop.ozone.web.utils.OzoneUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 
 /**
  * A {@link StorageHandler} implementation that distributes object storage
@@ -71,18 +79,23 @@ public final class DistributedStorageHandler implements StorageHandler {
   private static final Logger LOG =
       LoggerFactory.getLogger(DistributedStorageHandler.class);
 
-  private final StorageContainerLocationProtocolClientSideTranslatorPB
+  private final StorageContainerLocationProtocol
       storageContainerLocationClient;
-  private final OzoneManagerProtocolClientSideTranslatorPB
+  private final OzoneManagerProtocol
       ozoneManagerClient;
   private final XceiverClientManager xceiverClientManager;
-  private final OzoneAcl.OzoneACLRights userRights;
-  private final OzoneAcl.OzoneACLRights groupRights;
+  private final ACLType userRights;
+  private final ACLType groupRights;
   private int chunkSize;
-  private final boolean useRatis;
-  private final HddsProtos.ReplicationType type;
-  private final HddsProtos.ReplicationFactor factor;
-  private final RetryPolicy retryPolicy;
+  private final long streamBufferFlushSize;
+  private final long streamBufferMaxSize;
+  private final long watchTimeout;
+  private final long blockSize;
+  private final ChecksumType checksumType;
+  private final int bytesPerChecksum;
+  private final boolean verifyChecksum;
+  private final int maxRetryCount;
+  private final long retryInterval;
 
   /**
    * Creates a new DistributedStorageHandler.
@@ -92,39 +105,74 @@ public final class DistributedStorageHandler implements StorageHandler {
    * @param ozoneManagerClient OzoneManager proxy
    */
   public DistributedStorageHandler(OzoneConfiguration conf,
-      StorageContainerLocationProtocolClientSideTranslatorPB
-          storageContainerLocation,
-      OzoneManagerProtocolClientSideTranslatorPB
-                                       ozoneManagerClient) {
+      StorageContainerLocationProtocol storageContainerLocation,
+      OzoneManagerProtocol ozoneManagerClient) {
     this.ozoneManagerClient = ozoneManagerClient;
     this.storageContainerLocationClient = storageContainerLocation;
     this.xceiverClientManager = new XceiverClientManager(conf);
-    this.useRatis = conf.getBoolean(
-        ScmConfigKeys.DFS_CONTAINER_RATIS_ENABLED_KEY,
-        ScmConfigKeys.DFS_CONTAINER_RATIS_ENABLED_DEFAULT);
 
-    if(useRatis) {
-      type = HddsProtos.ReplicationType.RATIS;
-      factor = HddsProtos.ReplicationFactor.THREE;
-    } else {
-      type = HddsProtos.ReplicationType.STAND_ALONE;
-      factor = HddsProtos.ReplicationFactor.ONE;
-    }
-
-    chunkSize = conf.getInt(ScmConfigKeys.OZONE_SCM_CHUNK_SIZE_KEY,
-        ScmConfigKeys.OZONE_SCM_CHUNK_SIZE_DEFAULT);
-    userRights = conf.getEnum(OMConfigKeys.OZONE_OM_USER_RIGHTS,
-        OMConfigKeys.OZONE_OM_USER_RIGHTS_DEFAULT);
-    groupRights = conf.getEnum(OMConfigKeys.OZONE_OM_GROUP_RIGHTS,
-        OMConfigKeys.OZONE_OM_GROUP_RIGHTS_DEFAULT);
-    retryPolicy = OzoneClientUtils.createRetryPolicy(conf);
-    if(chunkSize > ScmConfigKeys.OZONE_SCM_CHUNK_MAX_SIZE) {
+    chunkSize = (int)conf.getStorageSize(ScmConfigKeys.OZONE_SCM_CHUNK_SIZE_KEY,
+        ScmConfigKeys.OZONE_SCM_CHUNK_SIZE_DEFAULT, StorageUnit.BYTES);
+    // Get default acl rights for user and group.
+    OzoneAclConfig aclConfig = conf.getObject(OzoneAclConfig.class);
+    this.userRights = aclConfig.getUserDefaultRights();
+    this.groupRights = aclConfig.getGroupDefaultRights();
+    if(chunkSize > OzoneConsts.OZONE_SCM_CHUNK_MAX_SIZE) {
       LOG.warn("The chunk size ({}) is not allowed to be more than"
               + " the maximum size ({}),"
               + " resetting to the maximum size.",
-          chunkSize, ScmConfigKeys.OZONE_SCM_CHUNK_MAX_SIZE);
-      chunkSize = ScmConfigKeys.OZONE_SCM_CHUNK_MAX_SIZE;
+          chunkSize, OzoneConsts.OZONE_SCM_CHUNK_MAX_SIZE);
+      chunkSize = OzoneConsts.OZONE_SCM_CHUNK_MAX_SIZE;
     }
+    streamBufferFlushSize = (long) conf
+        .getStorageSize(OzoneConfigKeys.OZONE_CLIENT_STREAM_BUFFER_FLUSH_SIZE,
+            OzoneConfigKeys.OZONE_CLIENT_STREAM_BUFFER_FLUSH_SIZE_DEFAULT,
+            StorageUnit.BYTES);
+    streamBufferMaxSize = (long) conf
+        .getStorageSize(OzoneConfigKeys.OZONE_CLIENT_STREAM_BUFFER_MAX_SIZE,
+            OzoneConfigKeys.OZONE_CLIENT_STREAM_BUFFER_MAX_SIZE_DEFAULT,
+            StorageUnit.BYTES);
+    blockSize = (long) conf.getStorageSize(OzoneConfigKeys.OZONE_SCM_BLOCK_SIZE,
+        OzoneConfigKeys.OZONE_SCM_BLOCK_SIZE_DEFAULT, StorageUnit.BYTES);
+    watchTimeout =
+        conf.getTimeDuration(OzoneConfigKeys.OZONE_CLIENT_WATCH_REQUEST_TIMEOUT,
+            OzoneConfigKeys.OZONE_CLIENT_WATCH_REQUEST_TIMEOUT_DEFAULT,
+            TimeUnit.MILLISECONDS);
+
+    int configuredChecksumSize = (int) conf.getStorageSize(
+        OzoneConfigKeys.OZONE_CLIENT_BYTES_PER_CHECKSUM,
+        OzoneConfigKeys.OZONE_CLIENT_BYTES_PER_CHECKSUM_DEFAULT,
+        StorageUnit.BYTES);
+
+    if(configuredChecksumSize <
+        OzoneConfigKeys.OZONE_CLIENT_BYTES_PER_CHECKSUM_MIN_SIZE) {
+      LOG.warn("The checksum size ({}) is not allowed to be less than the " +
+              "minimum size ({}), resetting to the minimum size.",
+          configuredChecksumSize,
+          OzoneConfigKeys.OZONE_CLIENT_BYTES_PER_CHECKSUM_MIN_SIZE);
+      bytesPerChecksum =
+          OzoneConfigKeys.OZONE_CLIENT_BYTES_PER_CHECKSUM_MIN_SIZE;
+    } else {
+      bytesPerChecksum = configuredChecksumSize;
+    }
+    String checksumTypeStr = conf.get(
+        OzoneConfigKeys.OZONE_CLIENT_CHECKSUM_TYPE,
+        OzoneConfigKeys.OZONE_CLIENT_CHECKSUM_TYPE_DEFAULT);
+    this.checksumType = ChecksumType.valueOf(checksumTypeStr);
+    this.verifyChecksum =
+        conf.getBoolean(OzoneConfigKeys.OZONE_CLIENT_VERIFY_CHECKSUM,
+            OzoneConfigKeys.OZONE_CLIENT_VERIFY_CHECKSUM_DEFAULT);
+    this.maxRetryCount =
+        conf.getInt(OzoneConfigKeys.OZONE_CLIENT_MAX_RETRIES, OzoneConfigKeys.
+            OZONE_CLIENT_MAX_RETRIES_DEFAULT);
+    this.retryInterval = OzoneUtils.getTimeDurationInMS(conf,
+        OzoneConfigKeys.OZONE_CLIENT_RETRY_INTERVAL,
+        OzoneConfigKeys.OZONE_CLIENT_RETRY_INTERVAL_DEFAULT);
+    boolean isUnsafeByteOperationsEnabled = conf.getBoolean(
+        OzoneConfigKeys.OZONE_UNSAFEBYTEOPERATIONS_ENABLED,
+        OzoneConfigKeys.OZONE_UNSAFEBYTEOPERATIONS_ENABLED_DEFAULT);
+    ByteStringHelper.init(isUnsafeByteOperationsEnabled);
+
   }
 
   @Override
@@ -132,8 +180,7 @@ public final class DistributedStorageHandler implements StorageHandler {
     long quota = args.getQuota() == null ?
         OzoneConsts.MAX_QUOTA_IN_BYTES : args.getQuota().sizeInBytes();
     OzoneAcl userAcl =
-        new OzoneAcl(OzoneAcl.OzoneACLType.USER,
-            args.getUserName(), userRights);
+        new OzoneAcl(ACLIdentityType.USER, args.getUserName(), userRights);
     OmVolumeArgs.Builder builder = OmVolumeArgs.newBuilder();
     builder.setAdminName(args.getAdminName())
         .setOwnerName(args.getUserName())
@@ -143,7 +190,7 @@ public final class DistributedStorageHandler implements StorageHandler {
     if (args.getGroups() != null) {
       for (String group : args.getGroups()) {
         OzoneAcl groupAcl =
-            new OzoneAcl(OzoneAcl.OzoneACLType.GROUP, group, groupRights);
+            new OzoneAcl(ACLIdentityType.GROUP, group, groupRights);
         builder.addOzoneAcls(OMPBHelper.convertOzoneAcl(groupAcl));
       }
     }
@@ -399,6 +446,8 @@ public final class DistributedStorageHandler implements StorageHandler {
   @Override
   public OutputStream newKeyWriter(KeyArgs args) throws IOException,
       OzoneException {
+    Objects.requireNonNull(args.getUserName(),
+        "Username should not be null");
     OmKeyArgs keyArgs = new OmKeyArgs.Builder()
         .setVolumeName(args.getVolumeName())
         .setBucketName(args.getBucketName())
@@ -406,25 +455,34 @@ public final class DistributedStorageHandler implements StorageHandler {
         .setDataSize(args.getSize())
         .setType(xceiverClientManager.getType())
         .setFactor(xceiverClientManager.getFactor())
+        .setAcls(OzoneUtils.getAclList(args.getUserName(),
+            args.getGroups() != null ? Arrays.asList(args.getGroups()) : null,
+            ACLType.ALL, ACLType.ALL))
         .build();
     // contact OM to allocate a block for key.
     OpenKeySession openKey = ozoneManagerClient.openKey(keyArgs);
-    ChunkGroupOutputStream groupOutputStream =
-        new ChunkGroupOutputStream.Builder()
+    KeyOutputStream keyOutputStream =
+        new KeyOutputStream.Builder()
             .setHandler(openKey)
             .setXceiverClientManager(xceiverClientManager)
-            .setScmClient(storageContainerLocationClient)
             .setOmClient(ozoneManagerClient)
             .setChunkSize(chunkSize)
             .setRequestID(args.getRequestID())
             .setType(xceiverClientManager.getType())
             .setFactor(xceiverClientManager.getFactor())
-            .setRetryPolicy(retryPolicy)
+            .setStreamBufferFlushSize(streamBufferFlushSize)
+            .setStreamBufferMaxSize(streamBufferMaxSize)
+            .setBlockSize(blockSize)
+            .setWatchTimeout(watchTimeout)
+            .setChecksumType(checksumType)
+            .setBytesPerChecksum(bytesPerChecksum)
+            .setMaxRetryCount(maxRetryCount)
+            .setRetryInterval(retryInterval)
             .build();
-    groupOutputStream.addPreallocateBlocks(
+    keyOutputStream.addPreallocateBlocks(
         openKey.getKeyInfo().getLatestVersionLocations(),
         openKey.getOpenVersion());
-    return new OzoneOutputStream(groupOutputStream);
+    return new OzoneOutputStream(keyOutputStream);
   }
 
   @Override
@@ -441,11 +499,11 @@ public final class DistributedStorageHandler implements StorageHandler {
         .setBucketName(args.getBucketName())
         .setKeyName(args.getKeyName())
         .setDataSize(args.getSize())
+        .setRefreshPipeline(true)
         .build();
     OmKeyInfo keyInfo = ozoneManagerClient.lookupKey(keyArgs);
-    return ChunkGroupInputStream.getFromOmKeyInfo(
-        keyInfo, xceiverClientManager, storageContainerLocationClient,
-        args.getRequestID());
+    return KeyInputStream.getFromOmKeyInfo(
+        keyInfo, xceiverClientManager, verifyChecksum);
   }
 
   @Override
@@ -475,6 +533,7 @@ public final class DistributedStorageHandler implements StorageHandler {
         .setVolumeName(args.getVolumeName())
         .setBucketName(args.getBucketName())
         .setKeyName(args.getKeyName())
+        .setRefreshPipeline(true)
         .build();
 
     OmKeyInfo omKeyInfo = ozoneManagerClient.lookupKey(keyArgs);
@@ -486,6 +545,7 @@ public final class DistributedStorageHandler implements StorageHandler {
         HddsClientUtils.formatDateTime(omKeyInfo.getCreationTime()));
     keyInfo.setModifiedOn(
         HddsClientUtils.formatDateTime(omKeyInfo.getModificationTime()));
+    keyInfo.setType(ReplicationType.valueOf(omKeyInfo.getType().toString()));
     return keyInfo;
   }
 
@@ -495,6 +555,7 @@ public final class DistributedStorageHandler implements StorageHandler {
         .setVolumeName(args.getVolumeName())
         .setBucketName(args.getBucketName())
         .setKeyName(args.getKeyName())
+        .setRefreshPipeline(true)
         .build();
     OmKeyInfo omKeyInfo = ozoneManagerClient.lookupKey(keyArgs);
     List<KeyLocation> keyLocations = new ArrayList<>();
@@ -510,6 +571,8 @@ public final class DistributedStorageHandler implements StorageHandler {
     keyInfoDetails.setModifiedOn(
         HddsClientUtils.formatDateTime(omKeyInfo.getModificationTime()));
     keyInfoDetails.setKeyLocations(keyLocations);
+    keyInfoDetails.setType(ReplicationType.valueOf(omKeyInfo.getType()
+        .toString()));
     return keyInfoDetails;
   }
 
@@ -553,6 +616,7 @@ public final class DistributedStorageHandler implements StorageHandler {
             HddsClientUtils.formatDateTime(info.getCreationTime()));
         tempInfo.setModifiedOn(
             HddsClientUtils.formatDateTime(info.getModificationTime()));
+        tempInfo.setType(ReplicationType.valueOf(info.getType().toString()));
 
         result.addKey(tempInfo);
       }

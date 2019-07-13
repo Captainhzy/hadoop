@@ -19,8 +19,23 @@
 
 package org.apache.hadoop.utils.db;
 
-import org.apache.commons.lang3.RandomStringUtils;
+import javax.management.MBeanServer;
+
+import java.io.IOException;
+import java.lang.management.ManagementFactory;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import org.apache.commons.codec.binary.StringUtils;
 import org.apache.hadoop.hdfs.DFSUtil;
+
+import org.apache.commons.lang3.RandomStringUtils;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -33,17 +48,6 @@ import org.rocksdb.DBOptions;
 import org.rocksdb.RocksDB;
 import org.rocksdb.Statistics;
 import org.rocksdb.StatsLevel;
-
-import javax.management.MBeanServer;
-import java.io.IOException;
-import java.lang.management.ManagementFactory;
-import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
 
 /**
  * RDBStore Tests.
@@ -86,21 +90,26 @@ public class TestRDBStore {
     }
   }
 
+  private void insertRandomData(RDBStore dbStore, int familyIndex)
+      throws Exception {
+    try (Table firstTable = dbStore.getTable(families.get(familyIndex))) {
+      Assert.assertNotNull("Table cannot be null", firstTable);
+      for (int x = 0; x < 100; x++) {
+        byte[] key =
+          RandomStringUtils.random(10).getBytes(StandardCharsets.UTF_8);
+        byte[] value =
+          RandomStringUtils.random(10).getBytes(StandardCharsets.UTF_8);
+        firstTable.put(key, value);
+      }
+    }
+  }
+
   @Test
   public void compactDB() throws Exception {
     try (RDBStore newStore =
              new RDBStore(folder.newFolder(), options, configSet)) {
       Assert.assertNotNull("DB Store cannot be null", newStore);
-      try (Table firstTable = newStore.getTable(families.get(1))) {
-        Assert.assertNotNull("Table cannot be null", firstTable);
-        for (int x = 0; x < 100; x++) {
-          byte[] key =
-              RandomStringUtils.random(10).getBytes(StandardCharsets.UTF_8);
-          byte[] value =
-              RandomStringUtils.random(10).getBytes(StandardCharsets.UTF_8);
-          firstTable.put(key, value);
-        }
-      }
+      insertRandomData(newStore, 1);
       // This test does not assert anything if there is any error this test
       // will throw and fail.
       newStore.compactDB();
@@ -126,7 +135,8 @@ public class TestRDBStore {
 
     try (Table firstTable = rdbStore.getTable(families.get(1))) {
       firstTable.put(key, value);
-      try (Table secondTable = rdbStore.getTable(families.get(2))) {
+      try (Table<byte[], byte[]> secondTable = rdbStore
+          .getTable(families.get(2))) {
         rdbStore.move(key, firstTable, secondTable);
         byte[] newvalue = secondTable.get(key);
         // Make sure we have value in the second table
@@ -150,7 +160,8 @@ public class TestRDBStore {
         RandomStringUtils.random(10).getBytes(StandardCharsets.UTF_8);
     try (Table firstTable = rdbStore.getTable(families.get(1))) {
       firstTable.put(key, value);
-      try (Table secondTable = rdbStore.getTable(families.get(2))) {
+      try (Table<byte[], byte[]> secondTable = rdbStore
+          .getTable(families.get(2))) {
         rdbStore.move(key, nextValue, firstTable, secondTable);
         byte[] newvalue = secondTable.get(key);
         // Make sure we have value in the second table
@@ -168,29 +179,13 @@ public class TestRDBStore {
     try (RDBStore newStore =
              new RDBStore(folder.newFolder(), options, configSet)) {
       Assert.assertNotNull("DB Store cannot be null", newStore);
+
       // Write 100 keys to the first table.
-      try (Table firstTable = newStore.getTable(families.get(1))) {
-        Assert.assertNotNull("Table cannot be null", firstTable);
-        for (int x = 0; x < 100; x++) {
-          byte[] key =
-              RandomStringUtils.random(10).getBytes(StandardCharsets.UTF_8);
-          byte[] value =
-              RandomStringUtils.random(10).getBytes(StandardCharsets.UTF_8);
-          firstTable.put(key, value);
-        }
-      }
+      insertRandomData(newStore, 1);
 
       // Write 100 keys to the secondTable table.
-      try (Table secondTable = newStore.getTable(families.get(2))) {
-        Assert.assertNotNull("Table cannot be null", secondTable);
-        for (int x = 0; x < 100; x++) {
-          byte[] key =
-              RandomStringUtils.random(10).getBytes(StandardCharsets.UTF_8);
-          byte[] value =
-              RandomStringUtils.random(10).getBytes(StandardCharsets.UTF_8);
-          secondTable.put(key, value);
-        }
-      }
+      insertRandomData(newStore, 2);
+
       // Let us make sure that our estimate is not off by 10%
       Assert.assertTrue(newStore.getEstimatedKeyCount() > 180
           || newStore.getEstimatedKeyCount() < 220);
@@ -252,4 +247,82 @@ public class TestRDBStore {
     }
     Assert.assertEquals(0, count);
   }
+
+  @Test
+  public void testRocksDBCheckpoint() throws Exception {
+    try (RDBStore newStore =
+             new RDBStore(folder.newFolder(), options, configSet)) {
+      Assert.assertNotNull("DB Store cannot be null", newStore);
+
+      insertRandomData(newStore, 1);
+      DBCheckpoint checkpoint =
+          newStore.getCheckpoint(true);
+      Assert.assertNotNull(checkpoint);
+
+      RDBStore restoredStoreFromCheckPoint =
+          new RDBStore(checkpoint.getCheckpointLocation().toFile(),
+              options, configSet);
+
+      // Let us make sure that our estimate is not off by 10%
+      Assert.assertTrue(
+          restoredStoreFromCheckPoint.getEstimatedKeyCount() > 90
+          || restoredStoreFromCheckPoint.getEstimatedKeyCount() < 110);
+      checkpoint.cleanupCheckpoint();
+    }
+
+  }
+
+  @Test
+  public void testRocksDBCheckpointCleanup() throws Exception {
+    try (RDBStore newStore =
+             new RDBStore(folder.newFolder(), options, configSet)) {
+      Assert.assertNotNull("DB Store cannot be null", newStore);
+
+      insertRandomData(newStore, 1);
+      DBCheckpoint checkpoint =
+          newStore.getCheckpoint(true);
+      Assert.assertNotNull(checkpoint);
+
+      Assert.assertTrue(Files.exists(
+          checkpoint.getCheckpointLocation()));
+      checkpoint.cleanupCheckpoint();
+      Assert.assertFalse(Files.exists(
+          checkpoint.getCheckpointLocation()));
+    }
+  }
+
+  /**
+   * Not strictly a unit test. Just a confirmation of the expected behavior
+   * of RocksDB keyMayExist API.
+   * Expected behavior - On average, keyMayExist latency < key.get() latency
+   * for invalid keys.
+   * @throws Exception if unable to read from RocksDB.
+   */
+  @Test
+  public void testRocksDBKeyMayExistApi() throws Exception {
+    try (RDBStore newStore =
+             new RDBStore(folder.newFolder(), options, configSet)) {
+      RocksDB db = newStore.getDb();
+
+      //Test with 50 invalid keys.
+      long start = System.nanoTime();
+      for (int i = 0; i < 50; i++) {
+        Assert.assertTrue(db.get(
+            StringUtils.getBytesUtf16("key" + i))== null);
+      }
+      long end = System.nanoTime();
+      long keyGetLatency = end - start;
+
+      start = System.nanoTime();
+      for (int i = 0; i < 50; i++) {
+        Assert.assertFalse(db.keyMayExist(
+            StringUtils.getBytesUtf16("key" + i), new StringBuilder()));
+      }
+      end = System.nanoTime();
+      long keyMayExistLatency = end - start;
+
+      Assert.assertTrue(keyMayExistLatency < keyGetLatency);
+    }
+  }
+
 }

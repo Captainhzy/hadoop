@@ -19,12 +19,14 @@
 
 package org.apache.hadoop.utils.db;
 
-import org.apache.hadoop.classification.InterfaceStability;
-import org.rocksdb.ColumnFamilyHandle;
-import org.rocksdb.WriteBatch;
-
 import java.io.IOException;
+import java.util.Iterator;
+import java.util.Map;
 
+import org.apache.commons.lang3.NotImplementedException;
+import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.utils.db.cache.CacheKey;
+import org.apache.hadoop.utils.db.cache.CacheValue;
 /**
  * Interface for key-value store that stores ozone metadata. Ozone metadata is
  * stored as key value pairs, both key and value are arbitrary byte arrays. Each
@@ -32,7 +34,7 @@ import java.io.IOException;
  * different kind of tables.
  */
 @InterfaceStability.Evolving
-public interface Table extends AutoCloseable {
+public interface Table<KEY, VALUE> extends AutoCloseable {
 
   /**
    * Puts a key-value pair into the store.
@@ -40,13 +42,33 @@ public interface Table extends AutoCloseable {
    * @param key metadata key
    * @param value metadata value
    */
-  void put(byte[] key, byte[] value) throws IOException;
+  void put(KEY key, VALUE value) throws IOException;
+
+  /**
+   * Puts a key-value pair into the store as part of a bath operation.
+   *
+   * @param batch the batch operation
+   * @param key metadata key
+   * @param value metadata value
+   */
+  void putWithBatch(BatchOperation batch, KEY key, VALUE value)
+      throws IOException;
 
   /**
    * @return true if the metadata store is empty.
    * @throws IOException on Failure
    */
   boolean isEmpty() throws IOException;
+
+  /**
+   * Check if a given key exists in Metadata store.
+   * (Optimization to save on data deserialization)
+   * A lock on the key / bucket needs to be acquired before invoking this API.
+   * @param key metadata key
+   * @return true if the metadata store contains a key.
+   * @throws IOException on Failure
+   */
+  boolean isExist(KEY key) throws IOException;
 
   /**
    * Returns the value mapped to the given key in byte array or returns null
@@ -56,7 +78,7 @@ public interface Table extends AutoCloseable {
    * @return value in byte array or null if the key is not found.
    * @throws IOException on Failure
    */
-  byte[] get(byte[] key) throws IOException;
+  VALUE get(KEY key) throws IOException;
 
   /**
    * Deletes a key from the metadata store.
@@ -64,29 +86,23 @@ public interface Table extends AutoCloseable {
    * @param key metadata key
    * @throws IOException on Failure
    */
-  void delete(byte[] key) throws IOException;
+  void delete(KEY key) throws IOException;
 
   /**
-   * Return the Column Family handle. TODO: This leaks an RockDB abstraction
-   * into Ozone code, cleanup later.
+   * Deletes a key from the metadata store as part of a batch operation.
    *
-   * @return ColumnFamilyHandle
+   * @param batch the batch operation
+   * @param key metadata key
+   * @throws IOException on Failure
    */
-  ColumnFamilyHandle getHandle();
-
-  /**
-   * A batch of PUT, DELETE operations handled as a single atomic write.
-   *
-   * @throws IOException write fails
-   */
-  void writeBatch(WriteBatch operation) throws IOException;
+  void deleteWithBatch(BatchOperation batch, KEY key) throws IOException;
 
   /**
    * Returns the iterator for this metadata store.
    *
    * @return MetaStoreIterator
    */
-  TableIterator<KeyValue> iterator();
+  TableIterator<KEY, ? extends KeyValue<KEY, VALUE>> iterator();
 
   /**
    * Returns the Name of this Table.
@@ -96,55 +112,50 @@ public interface Table extends AutoCloseable {
   String getName() throws IOException;
 
   /**
+   * Add entry to the table cache.
+   *
+   * If the cacheKey already exists, it will override the entry.
+   * @param cacheKey
+   * @param cacheValue
+   */
+  default void addCacheEntry(CacheKey<KEY> cacheKey,
+      CacheValue<VALUE> cacheValue) {
+    throw new NotImplementedException("addCacheEntry is not implemented");
+  }
+
+  /**
+   * Get the cache value from table cache.
+   * @param cacheKey
+   */
+  default CacheValue<VALUE> getCacheValue(CacheKey<KEY> cacheKey) {
+    throw new NotImplementedException("getCacheValue is not implemented");
+  }
+
+  /**
+   * Removes all the entries from the table cache which are having epoch value
+   * less
+   * than or equal to specified epoch value.
+   * @param epoch
+   */
+  default void cleanupCache(long epoch) {
+    throw new NotImplementedException("cleanupCache is not implemented");
+  }
+
+  /**
+   * Return cache iterator maintained for this table.
+   */
+  default Iterator<Map.Entry<CacheKey<KEY>, CacheValue<VALUE>>>
+      cacheIterator() {
+    throw new NotImplementedException("cacheIterator is not implemented");
+  }
+
+  /**
    * Class used to represent the key and value pair of a db entry.
    */
-  class KeyValue {
+  interface KeyValue<KEY, VALUE> {
 
-    private final byte[] key;
-    private final byte[] value;
+    KEY getKey() throws IOException;
 
-    /**
-     * KeyValue Constructor, used to represent a key and value of a db entry.
-     *
-     * @param key - Key Bytes
-     * @param value - Value bytes
-     */
-    private KeyValue(byte[] key, byte[] value) {
-      this.key = key;
-      this.value = value;
-    }
-
-    /**
-     * Create a KeyValue pair.
-     *
-     * @param key - Key Bytes
-     * @param value - Value bytes
-     * @return KeyValue object.
-     */
-    public static KeyValue create(byte[] key, byte[] value) {
-      return new KeyValue(key, value);
-    }
-
-    /**
-     * Return key.
-     *
-     * @return byte[]
-     */
-    public byte[] getKey() {
-      byte[] result = new byte[key.length];
-      System.arraycopy(key, 0, result, 0, key.length);
-      return result;
-    }
-
-    /**
-     * Return value.
-     *
-     * @return byte[]
-     */
-    public byte[] getValue() {
-      byte[] result = new byte[value.length];
-      System.arraycopy(value, 0, result, 0, value.length);
-      return result;
-    }
+    VALUE getValue() throws IOException;
   }
 }

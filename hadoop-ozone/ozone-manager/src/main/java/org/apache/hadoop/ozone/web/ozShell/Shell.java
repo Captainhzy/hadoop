@@ -19,26 +19,10 @@
 package org.apache.hadoop.ozone.web.ozShell;
 
 import org.apache.hadoop.hdds.cli.GenericCli;
-import org.apache.hadoop.hdds.cli.HddsVersionProvider;
-import org.apache.hadoop.ozone.web.ozShell.bucket.CreateBucketHandler;
-import org.apache.hadoop.ozone.web.ozShell.bucket.DeleteBucketHandler;
-import org.apache.hadoop.ozone.web.ozShell.bucket.InfoBucketHandler;
-import org.apache.hadoop.ozone.web.ozShell.bucket.ListBucketHandler;
-import org.apache.hadoop.ozone.web.ozShell.bucket.UpdateBucketHandler;
-import org.apache.hadoop.ozone.web.ozShell.keys.DeleteKeyHandler;
-import org.apache.hadoop.ozone.web.ozShell.keys.GetKeyHandler;
-import org.apache.hadoop.ozone.web.ozShell.keys.InfoKeyHandler;
-import org.apache.hadoop.ozone.web.ozShell.keys.ListKeyHandler;
-import org.apache.hadoop.ozone.web.ozShell.keys.PutKeyHandler;
-import org.apache.hadoop.ozone.web.ozShell.volume.CreateVolumeHandler;
-import org.apache.hadoop.ozone.web.ozShell.volume.DeleteVolumeHandler;
-import org.apache.hadoop.ozone.web.ozShell.volume.InfoVolumeHandler;
-import org.apache.hadoop.ozone.web.ozShell.volume.ListVolumeHandler;
-import org.apache.hadoop.ozone.web.ozShell.volume.UpdateVolumeHandler;
+import org.apache.hadoop.ozone.om.exceptions.OMException;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import picocli.CommandLine.Command;
 
 /**
  * Ozone user interface commands.
@@ -46,36 +30,14 @@ import picocli.CommandLine.Command;
  * This class uses dispatch method to make calls
  * to appropriate handlers that execute the ozone functions.
  */
-@Command(name = "ozone oz",
-    description = "Client for the Ozone object store",
-    subcommands = {
-        InfoVolumeHandler.class,
-        ListVolumeHandler.class,
-        CreateVolumeHandler.class,
-        UpdateVolumeHandler.class,
-        DeleteVolumeHandler.class,
-        InfoBucketHandler.class,
-        ListBucketHandler.class,
-        CreateBucketHandler.class,
-        UpdateBucketHandler.class,
-        DeleteBucketHandler.class,
-        InfoKeyHandler.class,
-        ListKeyHandler.class,
-        PutKeyHandler.class,
-        GetKeyHandler.class,
-        DeleteKeyHandler.class
-    },
-    versionProvider = HddsVersionProvider.class,
-    mixinStandardHelpOptions = true)
-public class Shell extends GenericCli {
-
+public abstract class Shell extends GenericCli {
 
   private static final Logger LOG = LoggerFactory.getLogger(Shell.class);
 
   public static final String OZONE_URI_DESCRIPTION = "Ozone URI could start "
       + "with o3:// or http(s):// or without prefix. REST protocol will "
       + "be used for http(s), RPC otherwise. URI may contain the host and port "
-      + "of the SCM server. Both are optional. "
+      + "of the OM server. Both are optional. "
       + "If they are not specified it will be identified from "
       + "the config files.";
 
@@ -88,20 +50,28 @@ public class Shell extends GenericCli {
   public static final String OZONE_KEY_URI_DESCRIPTION =
       "URI of the volume/bucket/key.\n" + OZONE_URI_DESCRIPTION;
 
+  public static final String OZONE_S3BUCKET_URI_DESCRIPTION = "URI of the " +
+      "S3Bucket.\n" + OZONE_URI_DESCRIPTION;
+
   // General options
   public static final int DEFAULT_OZONE_PORT = 50070;
 
-  /**
-   * Main for the ozShell Command handling.
-   *
-   * @param argv - System Args Strings[]
-   * @throws Exception
-   */
-  public static void main(String[] argv) throws Exception {
-    new Shell().run(argv);
+
+
+  @Override
+  protected void printError(Throwable errorArg) {
+    if (errorArg instanceof OMException) {
+      if (isVerbose()) {
+        errorArg.printStackTrace(System.err);
+      } else {
+        OMException omException = (OMException) errorArg;
+        System.err.println(String
+            .format("%s %s", omException.getResult().name(),
+                omException.getMessage()));
+      }
+    } else {
+      super.printError(errorArg);
+    }
   }
-
-
-
 }
 

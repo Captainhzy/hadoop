@@ -96,6 +96,7 @@ import javax.net.SocketFactory;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.ReconfigurableBase;
@@ -166,6 +167,7 @@ import org.apache.hadoop.hdfs.server.datanode.SecureDataNodeStarter.SecureResour
 import org.apache.hadoop.hdfs.server.datanode.erasurecode.ErasureCodingWorker;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi;
+import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.AddBlockPoolException;
 import org.apache.hadoop.hdfs.server.datanode.metrics.DataNodeDiskMetrics;
 import org.apache.hadoop.hdfs.server.datanode.metrics.DataNodeMetrics;
 import org.apache.hadoop.hdfs.server.datanode.metrics.DataNodePeerMetrics;
@@ -213,6 +215,7 @@ import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Time;
 import org.apache.hadoop.util.Timer;
 import org.apache.hadoop.util.VersionInfo;
+import org.apache.hadoop.util.concurrent.HadoopExecutors;
 import org.apache.htrace.core.Tracer;
 import org.eclipse.jetty.util.ajax.JSON;
 
@@ -242,7 +245,7 @@ import org.slf4j.LoggerFactory;
  * DataNodes.
  *
  * The DataNode maintains just one critical table:
- *   block-> stream of bytes (of BLOCK_SIZE or less)
+ *   block{@literal ->} stream of bytes (of BLOCK_SIZE or less)
  *
  * This info is stored on a local disk.  The DataNode
  * reports the table's contents to the NameNode upon startup
@@ -294,7 +297,8 @@ public class DataNode extends ReconfigurableBase
 
   static final int CURRENT_BLOCK_FORMAT_VERSION = 1;
   public static final int MAX_VOLUME_FAILURE_TOLERATED_LIMIT = -1;
-  public static final String MAX_VOLUME_FAILURES_TOLERATED_MSG = "should be greater than -1";
+  public static final String MAX_VOLUME_FAILURES_TOLERATED_MSG =
+      "should be greater than or equal to -1";
 
   /** A list of property that are reconfigurable at runtime. */
   private static final List<String> RECONFIGURABLE_PROPERTIES =
@@ -394,6 +398,8 @@ public class DataNode extends ReconfigurableBase
   private static final double CONGESTION_RATIO = 1.5;
   private DiskBalancer diskBalancer;
 
+  private final ExecutorService xferService;
+
   @Nullable
   private final StorageLocationChecker storageLocationChecker;
 
@@ -434,6 +440,8 @@ public class DataNode extends ReconfigurableBase
     initOOBTimeout();
     storageLocationChecker = null;
     volumeChecker = new DatasetVolumeChecker(conf, new Timer());
+    this.xferService =
+        HadoopExecutors.newCachedThreadPool(new Daemon.DaemonFactory());
   }
 
   /**
@@ -474,6 +482,8 @@ public class DataNode extends ReconfigurableBase
         conf.get("hadoop.hdfs.configuration.version", "UNSPECIFIED");
 
     this.volumeChecker = new DatasetVolumeChecker(conf, new Timer());
+    this.xferService =
+        HadoopExecutors.newCachedThreadPool(new Daemon.DaemonFactory());
 
     // Determine whether we should try to pass file descriptors to clients.
     if (conf.getBoolean(HdfsClientConfigKeys.Read.ShortCircuit.KEY,
@@ -527,7 +537,7 @@ public class DataNode extends ReconfigurableBase
   }
 
   /**
-   * {@inheritdoc}.
+   * {@inheritDoc }.
    */
   @Override
   public String reconfigurePropertyImpl(String property, String newVal)
@@ -580,7 +590,15 @@ public class DataNode extends ReconfigurableBase
                       "balancer max concurrent movers must be larger than 0"));
             }
           }
-          xserver.updateBalancerMaxConcurrentMovers(movers);
+          boolean success = xserver.updateBalancerMaxConcurrentMovers(movers);
+          if (!success) {
+            rootException = new ReconfigurationException(
+                property,
+                newVal,
+                getConf().get(property),
+                new IllegalArgumentException(
+                    "Could not modify concurrent moves thread count"));
+          }
           return Integer.toString(movers);
         } catch (NumberFormatException nfe) {
           rootException = new ReconfigurationException(
@@ -1086,7 +1104,7 @@ public class DataNode extends ReconfigurableBase
       reason = "verifcation is not supported by SimulatedFSDataset";
     } 
     if (reason == null) {
-      directoryScanner = new DirectoryScanner(this, data, conf);
+      directoryScanner = new DirectoryScanner(data, conf);
       directoryScanner.start();
     } else {
       LOG.info("Periodic Directory Tree Verification scan " +
@@ -1403,9 +1421,9 @@ public class DataNode extends ReconfigurableBase
     int volsConfigured = dnConf.getVolsConfigured();
     if (volFailuresTolerated < MAX_VOLUME_FAILURE_TOLERATED_LIMIT
         || volFailuresTolerated >= volsConfigured) {
-      throw new DiskErrorException("Invalid value configured for "
+      throw new HadoopIllegalArgumentException("Invalid value configured for "
           + "dfs.datanode.failed.volumes.tolerated - " + volFailuresTolerated
-          + ". Value configured is either greater than -1 or >= "
+          + ". Value configured is either less than -1 or >= "
           + "to the number of configured volumes (" + volsConfigured + ").");
     }
 
@@ -1680,11 +1698,35 @@ public class DataNode extends ReconfigurableBase
     // Exclude failed disks before initializing the block pools to avoid startup
     // failures.
     checkDiskError();
-
-    data.addBlockPool(nsInfo.getBlockPoolID(), getConf());
+    try {
+      data.addBlockPool(nsInfo.getBlockPoolID(), getConf());
+    } catch (AddBlockPoolException e) {
+      handleAddBlockPoolError(e);
+    }
     blockScanner.enableBlockPoolId(bpos.getBlockPoolId());
     initDirectoryScanner(getConf());
     initDiskBalancer(data, getConf());
+  }
+
+  /**
+   * Handles an AddBlockPoolException object thrown from
+   * {@link org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.FsVolumeList#
+   * addBlockPool}. Will ensure that all volumes that encounted a
+   * AddBlockPoolException are removed from the DataNode and marked as failed
+   * volumes in the same way as a runtime volume failure.
+   *
+   * @param e this exception is a container for all IOException objects caught
+   *          in FsVolumeList#addBlockPool.
+   */
+  private void handleAddBlockPoolError(AddBlockPoolException e)
+      throws IOException {
+    Map<FsVolumeSpi, IOException> unhealthyDataDirs =
+        e.getFailingVolumes();
+    if (unhealthyDataDirs != null && !unhealthyDataDirs.isEmpty()) {
+      handleVolumeFailures(unhealthyDataDirs.keySet());
+    } else {
+      LOG.debug("HandleAddBlockPoolError called with empty exception list");
+    }
   }
 
   List<BPOfferService> getAllBpOs() {
@@ -1695,7 +1737,7 @@ public class DataNode extends ReconfigurableBase
     return blockPoolManager.get(bpid);
   }
   
-  int getBpOsCount() {
+  public int getBpOsCount() {
     return blockPoolManager.getAllNamenodeThreads().size();
   }
   
@@ -1755,7 +1797,12 @@ public class DataNode extends ReconfigurableBase
   public int getXferPort() {
     return streamingAddr.getPort();
   }
-  
+
+  @VisibleForTesting
+  public SaslDataTransferServer getSaslServer() {
+    return saslServer;
+  }
+
   /**
    * @return name useful for logging
    */
@@ -2047,6 +2094,9 @@ public class DataNode extends ReconfigurableBase
     // wait reconfiguration thread, if any, to exit
     shutdownReconfigurationTask();
 
+    LOG.info("Waiting up to 30 seconds for transfer threads to complete");
+    HadoopExecutors.shutdown(this.xferService, LOG, 15L, TimeUnit.SECONDS);
+
     // wait for all data receiver threads to exit
     if (this.threadGroup != null) {
       int sleepMs = 2;
@@ -2320,17 +2370,16 @@ public class DataNode extends ReconfigurableBase
     
     int numTargets = xferTargets.length;
     if (numTargets > 0) {
-      StringBuilder xfersBuilder = new StringBuilder();
-      for (int i = 0; i < numTargets; i++) {
-        xfersBuilder.append(xferTargets[i]);
-        xfersBuilder.append(" ");
-      }
-      LOG.info(bpReg + " Starting thread to transfer " + 
-               block + " to " + xfersBuilder);                       
+      final String xferTargetsString =
+          StringUtils.join(" ", Arrays.asList(xferTargets));
+      LOG.info("{} Starting thread to transfer {} to {}", bpReg, block,
+          xferTargetsString);
 
-      new Daemon(new DataTransfer(xferTargets, xferTargetStorageTypes,
-          xferTargetStorageIDs, block,
-          BlockConstructionStage.PIPELINE_SETUP_CREATE, "")).start();
+      final DataTransfer dataTransferTask = new DataTransfer(xferTargets,
+          xferTargetStorageTypes, xferTargetStorageIDs, block,
+          BlockConstructionStage.PIPELINE_SETUP_CREATE, "");
+
+      this.xferService.execute(dataTransferTask);
     }
   }
 
@@ -2713,7 +2762,8 @@ public class DataNode extends ReconfigurableBase
     return locations;
   }
 
-  /** Instantiate & Start a single datanode daemon and wait for it to finish.
+  /** Instantiate &amp; Start a single datanode daemon and wait for it to
+   * finish.
    *  If this thread is specifically interrupted, it will stop waiting.
    */
   @VisibleForTesting
@@ -2722,7 +2772,8 @@ public class DataNode extends ReconfigurableBase
     return createDataNode(args, conf, null);
   }
   
-  /** Instantiate & Start a single datanode daemon and wait for it to finish.
+  /** Instantiate &amp; Start a single datanode daemon and wait for it to
+   * finish.
    *  If this thread is specifically interrupted, it will stop waiting.
    */
   @VisibleForTesting
@@ -3006,15 +3057,22 @@ public class DataNode extends ReconfigurableBase
     b.setNumBytes(visible);
 
     if (targets.length > 0) {
-      Daemon daemon = new Daemon(threadGroup,
-          new DataTransfer(targets, targetStorageTypes, targetStorageIds, b,
-              stage, client));
-      daemon.start();
+      if (LOG.isDebugEnabled()) {
+        final String xferTargetsString =
+            StringUtils.join(" ", Arrays.asList(targets));
+        LOG.debug("Transferring a replica to {}", xferTargetsString);
+      }
+
+      final DataTransfer dataTransferTask = new DataTransfer(targets,
+          targetStorageTypes, targetStorageIds, b, stage, client);
+
+      @SuppressWarnings("unchecked")
+      Future<Void> f = (Future<Void>) this.xferService.submit(dataTransferTask);
       try {
-        daemon.join();
-      } catch (InterruptedException e) {
-        throw new IOException(
-            "Pipeline recovery for " + b + " is interrupted.", e);
+        f.get();
+      } catch (InterruptedException | ExecutionException e) {
+        throw new IOException("Pipeline recovery for " + b + " is interrupted.",
+            e);
       }
     }
   }

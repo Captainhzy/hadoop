@@ -21,14 +21,16 @@ package org.apache.hadoop.ozone.om;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.hdds.client.BlockID;
+import org.apache.hadoop.hdds.client.ContainerBlockID;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.hdds.scm.ScmInfo;
 import org.apache.hadoop.hdds.scm.TestUtils;
 import org.apache.hadoop.hdds.scm.container.common.helpers.AllocatedBlock;
 import org.apache.hadoop.hdds.scm.container.common.helpers.DeleteBlockResult;
-import org.apache.hadoop.hdds.scm.container.common.helpers.Pipeline;
-import org.apache.hadoop.hdds.scm.container.common.helpers.PipelineID;
+import org.apache.hadoop.hdds.scm.container.common.helpers.ExcludeList;
+import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
+import org.apache.hadoop.hdds.scm.pipeline.PipelineID;
 import org.apache.hadoop.hdds.scm.protocol.ScmBlockLocationProtocol;
 import org.apache.hadoop.ozone.common.BlockGroup;
 import org.apache.hadoop.ozone.common.DeleteBlockGroupResult;
@@ -38,6 +40,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 
@@ -102,37 +105,40 @@ public class ScmBlockLocationTestIngClient implements ScmBlockLocationProtocol {
   }
 
   /**
-   * Returns Fake blocks to the KeyManager so we get blocks in the Database.
+   * Returns Fake blocks to the BlockManager so we get blocks in the Database.
    * @param size - size of the block.
    * @param type Replication Type
    * @param factor - Replication factor
    * @param owner - String owner.
+   * @param excludeList list of dns/pipelines to exclude
    * @return
    * @throws IOException
    */
   @Override
-  public AllocatedBlock allocateBlock(long size,
+  public List<AllocatedBlock> allocateBlock(long size, int num,
       HddsProtos.ReplicationType type, HddsProtos.ReplicationFactor factor,
-      String owner) throws IOException {
+      String owner, ExcludeList excludeList) throws IOException {
     DatanodeDetails datanodeDetails = TestUtils.randomDatanodeDetails();
     Pipeline pipeline = createPipeline(datanodeDetails);
     long containerID = Time.monotonicNow();
     long localID = Time.monotonicNow();
     AllocatedBlock.Builder abb =
         new AllocatedBlock.Builder()
-            .setBlockID(new BlockID(containerID, localID))
-            .setPipeline(pipeline)
-            .setShouldCreateContainer(false);
-    return abb.build();
+            .setContainerBlockID(new ContainerBlockID(containerID, localID))
+            .setPipeline(pipeline);
+    return Collections.singletonList(abb.build());
   }
 
   private Pipeline createPipeline(DatanodeDetails datanode) {
-    final Pipeline pipeline =
-        new Pipeline(datanode.getUuidString(), HddsProtos.LifeCycleState.OPEN,
-            HddsProtos.ReplicationType.STAND_ALONE,
-            HddsProtos.ReplicationFactor.ONE,
-            PipelineID.randomId());
-    pipeline.addMember(datanode);
+    List<DatanodeDetails> dns = new ArrayList<>();
+    dns.add(datanode);
+    Pipeline pipeline = Pipeline.newBuilder()
+        .setState(Pipeline.PipelineState.OPEN)
+        .setId(PipelineID.randomId())
+        .setType(HddsProtos.ReplicationType.STAND_ALONE)
+        .setFactor(HddsProtos.ReplicationFactor.ONE)
+        .setNodes(dns)
+        .build();
     return pipeline;
   }
 
@@ -174,5 +180,16 @@ public class ScmBlockLocationTestIngClient implements ScmBlockLocationProtocol {
             .setClusterId(clusterID)
             .setScmId(scmId);
     return builder.build();
+  }
+
+  @Override
+  public List<DatanodeDetails> sortDatanodes(List<String> nodes,
+      String clientMachine) throws IOException {
+    return null;
+  }
+
+  @Override
+  public void close() throws IOException {
+
   }
 }

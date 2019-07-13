@@ -19,11 +19,12 @@
 
 package org.apache.hadoop.utils.db;
 
-import org.apache.hadoop.classification.InterfaceStability;
-import org.rocksdb.WriteBatch;
-
+import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Map;
+
+import org.apache.hadoop.classification.InterfaceStability;
 
 /**
  * The DBStore interface provides the ability to create Tables, which store
@@ -42,7 +43,20 @@ public interface DBStore extends AutoCloseable {
    * @return - TableStore.
    * @throws IOException on Failure
    */
-  Table getTable(String name) throws IOException;
+  Table<byte[], byte[]> getTable(String name) throws IOException;
+
+
+  /**
+   * Gets an existing TableStore with implicit key/value conversion.
+   *
+   * @param name - Name of the TableStore to get
+   * @param keyType
+   * @param valueType
+   * @return - TableStore.
+   * @throws IOException on Failure
+   */
+  <KEY, VALUE> Table<KEY, VALUE> getTable(String name,
+      Class<KEY> keyType, Class<VALUE> valueType) throws IOException;
 
   /**
    * Lists the Known list of Tables in a DB.
@@ -52,6 +66,12 @@ public interface DBStore extends AutoCloseable {
    * @throws IOException on Failure
    */
   ArrayList<Table> listTables() throws IOException;
+
+  /**
+   * Flush the DB buffer onto persistent storage.
+   * @throws IOException
+   */
+  void flush() throws IOException;
 
   /**
    * Compact the entire database.
@@ -68,7 +88,8 @@ public interface DBStore extends AutoCloseable {
    * @param dest - Destination Table.
    * @throws IOException on Failure
    */
-  void move(byte[] key, Table source, Table dest) throws IOException;
+  <KEY, VALUE> void move(KEY key, Table<KEY, VALUE> source,
+                         Table<KEY, VALUE> dest) throws IOException;
 
   /**
    * Moves a key from the Source Table to the destination Table and updates the
@@ -80,7 +101,8 @@ public interface DBStore extends AutoCloseable {
    * @param dest - Destination Table.
    * @throws IOException on Failure
    */
-  void move(byte[] key, byte[] value, Table source, Table dest)
+  <KEY, VALUE> void move(KEY key, VALUE value, Table<KEY, VALUE> source,
+                         Table<KEY, VALUE> dest)
       throws IOException;
 
   /**
@@ -96,8 +118,9 @@ public interface DBStore extends AutoCloseable {
    * @param dest - Destination Table.
    * @throws IOException on Failure
    */
-  void move(byte[] sourceKey, byte[] destKey, byte[] value,
-            Table source, Table dest) throws IOException;
+  <KEY, VALUE> void move(KEY sourceKey, KEY destKey, VALUE value,
+                         Table<KEY, VALUE> source, Table<KEY, VALUE> dest)
+      throws IOException;
 
   /**
    * Returns an estimated count of keys in this DB.
@@ -107,9 +130,46 @@ public interface DBStore extends AutoCloseable {
   long getEstimatedKeyCount() throws IOException;
 
   /**
-   * Writes a transaction into the DB using the default write Options.
-   * @param batch - Batch to write.
+   * Initialize an atomic batch operation which can hold multiple PUT/DELETE
+   * operations and committed later in one step.
+   *
+   * @return BatchOperation holder which can be used to add or commit batch
+   * operations.
    */
-  void write(WriteBatch batch) throws IOException;
+  BatchOperation initBatchOperation();
 
+  /**
+   * Commit the batch operations.
+   *
+   * @param operation which contains all the required batch operation.
+   * @throws IOException on Failure.
+   */
+  void commitBatchOperation(BatchOperation operation) throws IOException;
+
+  /**
+   * Get current snapshot of OM DB store as an artifact stored on
+   * the local filesystem.
+   * @return An object that encapsulates the checkpoint information along with
+   * location.
+   */
+  DBCheckpoint getCheckpoint(boolean flush) throws IOException;
+
+  /**
+   * Get DB Store location.
+   * @return DB file location.
+   */
+  File getDbLocation();
+
+  /**
+   * Get List of Index to Table Names.
+   * (For decoding table from column family index)
+   * @return Map of Index -> TableName
+   */
+  Map<Integer, String> getTableNames();
+
+  /**
+   * Get Codec registry.
+   * @return codec registry.
+   */
+  CodecRegistry getCodecRegistry();
 }

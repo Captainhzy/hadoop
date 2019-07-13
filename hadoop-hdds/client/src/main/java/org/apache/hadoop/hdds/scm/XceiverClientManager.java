@@ -25,8 +25,12 @@ import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.RemovalListener;
 import com.google.common.cache.RemovalNotification;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hdds.scm.container.common.helpers.Pipeline;
+import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
+import org.apache.hadoop.ozone.OzoneSecurityUtil;
+import org.apache.hadoop.security.UserGroupInformation;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -55,13 +59,16 @@ import static org.apache.hadoop.hdds.scm.ScmConfigKeys
  * not being used for a period of time.
  */
 public class XceiverClientManager implements Closeable {
-
+  private static final Logger LOG =
+      LoggerFactory.getLogger(XceiverClientManager.class);
   //TODO : change this to SCM configuration class
   private final Configuration conf;
-  private final Cache<Long, XceiverClientSpi> clientCache;
+  private final Cache<String, XceiverClientSpi> clientCache;
   private final boolean useRatis;
 
   private static XceiverClientMetrics metrics;
+  private boolean isSecurityEnabled;
+  private final boolean topologyAwareRead;
   /**
    * Creates a new XceiverClientManager.
    *
@@ -78,14 +85,15 @@ public class XceiverClientManager implements Closeable {
         ScmConfigKeys.DFS_CONTAINER_RATIS_ENABLED_KEY,
         ScmConfigKeys.DFS_CONTAINER_RATIS_ENABLED_DEFAULT);
     this.conf = conf;
+    this.isSecurityEnabled = OzoneSecurityUtil.isSecurityEnabled(conf);
     this.clientCache = CacheBuilder.newBuilder()
         .expireAfterAccess(staleThresholdMs, TimeUnit.MILLISECONDS)
         .maximumSize(maxSize)
         .removalListener(
-            new RemovalListener<Long, XceiverClientSpi>() {
+            new RemovalListener<String, XceiverClientSpi>() {
             @Override
             public void onRemoval(
-                RemovalNotification<Long, XceiverClientSpi>
+                RemovalNotification<String, XceiverClientSpi>
                   removalNotification) {
               synchronized (clientCache) {
                 // Mark the entry as evicted
@@ -94,10 +102,13 @@ public class XceiverClientManager implements Closeable {
               }
             }
           }).build();
+    topologyAwareRead = Boolean.parseBoolean(conf.get(
+        ScmConfigKeys.DFS_NETWORK_TOPOLOGY_AWARE_READ_ENABLED,
+        ScmConfigKeys.DFS_NETWORK_TOPOLOGY_AWARE_READ_ENABLED_DEFAULT));
   }
 
   @VisibleForTesting
-  public Cache<Long, XceiverClientSpi> getClientCache() {
+  public Cache<String, XceiverClientSpi> getClientCache() {
     return clientCache;
   }
 
@@ -112,14 +123,34 @@ public class XceiverClientManager implements Closeable {
    * @return XceiverClientSpi connected to a container
    * @throws IOException if a XceiverClientSpi cannot be acquired
    */
-  public XceiverClientSpi acquireClient(Pipeline pipeline, long containerID)
+  public XceiverClientSpi acquireClient(Pipeline pipeline)
+      throws IOException {
+    return acquireClient(pipeline, false);
+  }
+
+  /**
+   * Acquires a XceiverClientSpi connected to a container for read.
+   *
+   * If there is already a cached XceiverClientSpi, simply return
+   * the cached otherwise create a new one.
+   *
+   * @param pipeline the container pipeline for the client connection
+   * @return XceiverClientSpi connected to a container
+   * @throws IOException if a XceiverClientSpi cannot be acquired
+   */
+  public XceiverClientSpi acquireClientForReadData(Pipeline pipeline)
+      throws IOException {
+    return acquireClient(pipeline, true);
+  }
+
+  private XceiverClientSpi acquireClient(Pipeline pipeline, boolean read)
       throws IOException {
     Preconditions.checkNotNull(pipeline);
-    Preconditions.checkArgument(pipeline.getMachines() != null);
-    Preconditions.checkArgument(!pipeline.getMachines().isEmpty());
+    Preconditions.checkArgument(pipeline.getNodes() != null);
+    Preconditions.checkArgument(!pipeline.getNodes().isEmpty());
 
     synchronized (clientCache) {
-      XceiverClientSpi info = getClient(pipeline, containerID);
+      XceiverClientSpi info = getClient(pipeline, read);
       info.incrementReference();
       return info;
     }
@@ -129,25 +160,58 @@ public class XceiverClientManager implements Closeable {
    * Releases a XceiverClientSpi after use.
    *
    * @param client client to release
+   * @param invalidateClient if true, invalidates the client in cache
    */
-  public void releaseClient(XceiverClientSpi client) {
+  public void releaseClient(XceiverClientSpi client, boolean invalidateClient) {
+    releaseClient(client, invalidateClient, false);
+  }
+
+  /**
+   * Releases a read XceiverClientSpi after use.
+   *
+   * @param client client to release
+   * @param invalidateClient if true, invalidates the client in cache
+   */
+  public void releaseClientForReadData(XceiverClientSpi client,
+      boolean invalidateClient) {
+    releaseClient(client, invalidateClient, true);
+  }
+
+  private void releaseClient(XceiverClientSpi client, boolean invalidateClient,
+      boolean read) {
     Preconditions.checkNotNull(client);
     synchronized (clientCache) {
       client.decrementReference();
+      if (invalidateClient) {
+        Pipeline pipeline = client.getPipeline();
+        String key = getPipelineCacheKey(pipeline, read);
+        XceiverClientSpi cachedClient = clientCache.getIfPresent(key);
+        if (cachedClient == client) {
+          clientCache.invalidate(key);
+        }
+      }
     }
   }
 
-  private XceiverClientSpi getClient(Pipeline pipeline, long containerID)
+  private XceiverClientSpi getClient(Pipeline pipeline, boolean forRead)
       throws IOException {
+    HddsProtos.ReplicationType type = pipeline.getType();
     try {
-      return clientCache.get(containerID,
-          new Callable<XceiverClientSpi>() {
-          @Override
+      // create different client for read different pipeline node based on
+      // network topology
+      String key = getPipelineCacheKey(pipeline, forRead);
+      // Append user short name to key to prevent a different user
+      // from using same instance of xceiverClient.
+      key = isSecurityEnabled ?
+          key + UserGroupInformation.getCurrentUser().getShortUserName() : key;
+      return clientCache.get(key, new Callable<XceiverClientSpi>() {
+        @Override
           public XceiverClientSpi call() throws Exception {
             XceiverClientSpi client = null;
-            switch (pipeline.getType()) {
+            switch (type) {
             case RATIS:
               client = XceiverClientRatis.newXceiverClientRatis(pipeline, conf);
+              client.connect();
               break;
             case STAND_ALONE:
               client = new XceiverClientGrpc(pipeline, conf);
@@ -156,7 +220,6 @@ public class XceiverClientManager implements Closeable {
             default:
               throw new IOException("not implemented" + pipeline.getType());
             }
-            client.connect();
             return client;
           }
         });
@@ -166,9 +229,23 @@ public class XceiverClientManager implements Closeable {
     }
   }
 
+  private String getPipelineCacheKey(Pipeline pipeline, boolean forRead) {
+    String key = pipeline.getId().getId().toString() + pipeline.getType();
+    if (topologyAwareRead && forRead) {
+      try {
+        key += pipeline.getClosestNode().getHostName();
+      } catch (IOException e) {
+        LOG.error("Failed to get closest node to create pipeline cache key:" +
+            e.getMessage());
+      }
+    }
+    return key;
+  }
+
   /**
    * Close and remove all the cached clients.
    */
+  @Override
   public void close() {
     //closing is done through RemovalListener
     clientCache.invalidateAll();

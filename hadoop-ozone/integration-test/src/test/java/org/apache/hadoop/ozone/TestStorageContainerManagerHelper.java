@@ -22,12 +22,12 @@ import com.google.common.collect.Sets;
 import com.google.common.primitives.Longs;
 import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.StorageType;
+import org.apache.hadoop.hdds.protocol.StorageType;
 import org.apache.hadoop.hdds.scm.container.common.helpers.ContainerWithPipeline;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.server.datanode.ObjectStoreHandler;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
-import org.apache.hadoop.ozone.container.keyvalue.helpers.KeyUtils;
+import org.apache.hadoop.ozone.container.keyvalue.helpers.BlockUtils;
 import org.apache.hadoop.ozone.container.keyvalue.KeyValueContainerData;
 import org.apache.hadoop.ozone.container.ozoneimpl.OzoneContainer;
 import org.apache.hadoop.ozone.om.helpers.OmKeyArgs;
@@ -40,12 +40,11 @@ import org.apache.hadoop.ozone.web.interfaces.StorageHandler;
 import org.apache.hadoop.ozone.web.utils.OzoneUtils;
 import org.apache.hadoop.utils.MetadataKeyFilters;
 import org.apache.hadoop.utils.MetadataKeyFilters.KeyPrefixFilter;
-import org.apache.hadoop.utils.MetadataKeyFilters.MetadataKeyFilter;
-import org.apache.hadoop.utils.MetadataStore;
+import org.apache.hadoop.ozone.container.common.utils.ReferenceCountedDB;
 
 import java.io.IOException;
 import java.io.OutputStream;
-import java.util.LinkedList;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -83,8 +82,8 @@ public class TestStorageContainerManagerHelper {
     storageHandler.createVolume(createVolumeArgs);
 
     BucketArgs bucketArgs = new BucketArgs(bucket, createVolumeArgs);
-    bucketArgs.setAddAcls(new LinkedList<>());
-    bucketArgs.setRemoveAcls(new LinkedList<>());
+    bucketArgs.setAddAcls(new ArrayList<>());
+    bucketArgs.setRemoveAcls(new ArrayList<>());
     bucketArgs.setStorageType(StorageType.DISK);
     storageHandler.createBucket(bucketArgs);
 
@@ -108,6 +107,7 @@ public class TestStorageContainerManagerHelper {
           .setVolumeName(volume)
           .setBucketName(bucket)
           .setKeyName(key)
+          .setRefreshPipeline(true)
           .build();
       OmKeyInfo location = cluster.getOzoneManager()
           .lookupKey(arg);
@@ -119,16 +119,17 @@ public class TestStorageContainerManagerHelper {
   public List<String> getPendingDeletionBlocks(Long containerID)
       throws IOException {
     List<String> pendingDeletionBlocks = Lists.newArrayList();
-    MetadataStore meta = getContainerMetadata(containerID);
+    ReferenceCountedDB meta = getContainerMetadata(containerID);
     KeyPrefixFilter filter =
         new KeyPrefixFilter().addFilter(OzoneConsts.DELETING_KEY_PREFIX);
-    List<Map.Entry<byte[], byte[]>> kvs = meta
+    List<Map.Entry<byte[], byte[]>> kvs = meta.getStore()
         .getRangeKVs(null, Integer.MAX_VALUE, filter);
     kvs.forEach(entry -> {
       String key = DFSUtil.bytes2String(entry.getKey());
       pendingDeletionBlocks
           .add(key.replace(OzoneConsts.DELETING_KEY_PREFIX, ""));
     });
+    meta.close();
     return pendingDeletionBlocks;
   }
 
@@ -143,32 +144,31 @@ public class TestStorageContainerManagerHelper {
 
   public List<Long> getAllBlocks(Long containeID) throws IOException {
     List<Long> allBlocks = Lists.newArrayList();
-    MetadataStore meta = getContainerMetadata(containeID);
-    MetadataKeyFilter filter =
-        (preKey, currentKey, nextKey) -> !DFSUtil.bytes2String(currentKey)
-            .startsWith(OzoneConsts.DELETING_KEY_PREFIX);
+    ReferenceCountedDB meta = getContainerMetadata(containeID);
     List<Map.Entry<byte[], byte[]>> kvs =
-        meta.getRangeKVs(null, Integer.MAX_VALUE,
+        meta.getStore().getRangeKVs(null, Integer.MAX_VALUE,
             MetadataKeyFilters.getNormalKeyFilter());
     kvs.forEach(entry -> {
       allBlocks.add(Longs.fromByteArray(entry.getKey()));
     });
+    meta.close();
     return allBlocks;
   }
 
-  private MetadataStore getContainerMetadata(Long containerID)
+  private ReferenceCountedDB getContainerMetadata(Long containerID)
       throws IOException {
     ContainerWithPipeline containerWithPipeline = cluster
         .getStorageContainerManager().getClientProtocolServer()
         .getContainerWithPipeline(containerID);
 
-    DatanodeDetails leadDN = containerWithPipeline.getPipeline().getLeader();
+    DatanodeDetails dn =
+        containerWithPipeline.getPipeline().getFirstNode();
     OzoneContainer containerServer =
-        getContainerServerByDatanodeUuid(leadDN.getUuidString());
-    KeyValueContainerData containerData = (KeyValueContainerData) containerServer
-        .getContainerSet()
+        getContainerServerByDatanodeUuid(dn.getUuidString());
+    KeyValueContainerData containerData =
+        (KeyValueContainerData) containerServer.getContainerSet()
         .getContainer(containerID).getContainerData();
-    return KeyUtils.getDB(containerData, conf);
+    return BlockUtils.getDB(containerData, conf);
   }
 
   private OzoneContainer getContainerServerByDatanodeUuid(String dnUUID)

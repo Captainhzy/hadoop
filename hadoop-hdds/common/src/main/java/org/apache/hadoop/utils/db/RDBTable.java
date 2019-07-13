@@ -19,23 +19,28 @@
 
 package org.apache.hadoop.utils.db;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+
+import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.hdfs.DFSUtil;
+
 import org.rocksdb.ColumnFamilyHandle;
 import org.rocksdb.ReadOptions;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
-import org.rocksdb.WriteBatch;
 import org.rocksdb.WriteOptions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-
 /**
- * RocksDB implementation of ozone metadata store.
+ * RocksDB implementation of ozone metadata store. This class should be only
+ * used as part of TypedTable as it's underlying implementation to access the
+ * metadata store content. All other user's using Table should use TypedTable.
  */
-public class RDBTable implements Table {
+@InterfaceAudience.Private
+class RDBTable implements Table<byte[], byte[]> {
+
 
   private static final Logger LOG =
       LoggerFactory.getLogger(RDBTable.class);
@@ -51,7 +56,7 @@ public class RDBTable implements Table {
    * @param handle - ColumnFamily Handle.
    * @param writeOptions - RocksDB write Options.
    */
-  public RDBTable(RocksDB db, ColumnFamilyHandle handle,
+  RDBTable(RocksDB db, ColumnFamilyHandle handle,
       WriteOptions writeOptions) {
     this.db = db;
     this.handle = handle;
@@ -79,7 +84,6 @@ public class RDBTable implements Table {
    *
    * @return ColumnFamilyHandle.
    */
-  @Override
   public ColumnFamilyHandle getHandle() {
     return handle;
   }
@@ -97,10 +101,35 @@ public class RDBTable implements Table {
   }
 
   @Override
+  public void putWithBatch(BatchOperation batch, byte[] key, byte[] value)
+      throws IOException {
+    if (batch instanceof RDBBatchOperation) {
+      ((RDBBatchOperation) batch).put(getHandle(), key, value);
+    } else {
+      throw new IllegalArgumentException("batch should be RDBBatchOperation");
+    }
+  }
+
+
+  @Override
   public boolean isEmpty() throws IOException {
-    try (TableIterator<KeyValue> keyIter = iterator()) {
+    try (TableIterator<byte[], ByteArrayKeyValue> keyIter = iterator()) {
       keyIter.seekToFirst();
       return !keyIter.hasNext();
+    }
+  }
+
+  @Override
+  public boolean isExist(byte[] key) throws IOException {
+    try {
+      // RocksDB#keyMayExist
+      // If the key definitely does not exist in the database, then this
+      // method returns false, else true.
+      return db.keyMayExist(handle, key, new StringBuilder())
+          && db.get(handle, key) != null;
+    } catch (RocksDBException e) {
+      throw toIOException(
+          "Error in accessing DB. ", e);
     }
   }
 
@@ -124,36 +153,20 @@ public class RDBTable implements Table {
   }
 
   @Override
-  public void writeBatch(WriteBatch operation) throws IOException {
-    try {
-      db.write(writeOptions, operation);
-    } catch (RocksDBException e) {
-      throw toIOException("Batch write operation failed", e);
+  public void deleteWithBatch(BatchOperation batch, byte[] key)
+      throws IOException {
+    if (batch instanceof RDBBatchOperation) {
+      ((RDBBatchOperation) batch).delete(getHandle(), key);
+    } else {
+      throw new IllegalArgumentException("batch should be RDBBatchOperation");
     }
+
   }
 
-//  @Override
-//  public void iterate(byte[] from, EntryConsumer consumer)
-//      throws IOException {
-//
-//    try (RocksIterator it = db.newIterator(handle)) {
-//      if (from != null) {
-//        it.seek(from);
-//      } else {
-//        it.seekToFirst();
-//      }
-//      while (it.isValid()) {
-//        if (!consumer.consume(it.key(), it.value())) {
-//          break;
-//        }
-//        it.next();
-//      }
-//    }
-//  }
-
   @Override
-  public TableIterator<KeyValue> iterator() {
+  public TableIterator<byte[], ByteArrayKeyValue> iterator() {
     ReadOptions readOptions = new ReadOptions();
+    readOptions.setFillCache(false);
     return new RDBStoreIterator(db.newIterator(handle, readOptions));
   }
 

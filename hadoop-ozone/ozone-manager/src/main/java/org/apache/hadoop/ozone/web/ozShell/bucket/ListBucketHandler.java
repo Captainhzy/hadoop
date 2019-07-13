@@ -18,19 +18,17 @@
 
 package org.apache.hadoop.ozone.web.ozShell.bucket;
 
-import java.net.URI;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 
 import org.apache.hadoop.ozone.client.OzoneBucket;
-import org.apache.hadoop.ozone.client.OzoneClientException;
+import org.apache.hadoop.ozone.client.OzoneClient;
 import org.apache.hadoop.ozone.client.OzoneClientUtils;
 import org.apache.hadoop.ozone.client.OzoneVolume;
 import org.apache.hadoop.ozone.client.rest.response.BucketInfo;
 import org.apache.hadoop.ozone.web.ozShell.Handler;
+import org.apache.hadoop.ozone.web.ozShell.OzoneAddress;
 import org.apache.hadoop.ozone.web.ozShell.Shell;
 import org.apache.hadoop.ozone.web.utils.JsonUtils;
 
@@ -42,24 +40,25 @@ import picocli.CommandLine.Parameters;
 /**
  * Executes List Bucket.
  */
-@Command(name = "-listBucket",
+@Command(name = "list",
+    aliases = "ls",
     description = "lists the buckets in a volume.")
 public class ListBucketHandler extends Handler {
 
   @Parameters(arity = "1..1", description = Shell.OZONE_VOLUME_URI_DESCRIPTION)
   private String uri;
 
-  @Option(names = {"--length", "-length", "-l"},
+  @Option(names = {"--length", "-l"},
       description = "Limit of the max results",
       defaultValue = "100",
       showDefaultValue = Visibility.ALWAYS)
   private int maxBuckets;
 
-  @Option(names = {"--start", "-start", "-s"},
+  @Option(names = {"--start", "-s"},
       description = "The first bucket to start the listing")
   private String startBucket;
 
-  @Option(names = {"--prefix", "-prefix", "-p"},
+  @Option(names = {"--prefix", "-p"},
       description = "Prefix to filter the buckets")
   private String prefix;
   /**
@@ -68,18 +67,15 @@ public class ListBucketHandler extends Handler {
   @Override
   public Void call() throws Exception {
 
-    URI ozoneURI = verifyURI(uri);
-    Path path = Paths.get(ozoneURI.getPath());
-    if (path.getNameCount() < 1) {
-      throw new OzoneClientException("volume is required in listBucket");
-    }
+    OzoneAddress address = new OzoneAddress(uri);
+    address.ensureVolumeAddress();
+    OzoneClient client = address.createClient(createOzoneConfiguration());
 
+    String volumeName = address.getVolumeName();
     if (maxBuckets < 1) {
       throw new IllegalArgumentException(
           "the length should be a positive number");
     }
-
-    String volumeName = path.getName(0).toString();
 
     if (isVerbose()) {
       System.out.printf("Volume Name : %s%n", volumeName);
@@ -87,7 +83,8 @@ public class ListBucketHandler extends Handler {
 
 
     OzoneVolume vol = client.getObjectStore().getVolume(volumeName);
-    Iterator<OzoneBucket> bucketIterator = vol.listBuckets(prefix, startBucket);
+    Iterator<? extends OzoneBucket> bucketIterator =
+        vol.listBuckets(prefix, startBucket);
     List<BucketInfo> bucketList = new ArrayList<>();
     while (maxBuckets > 0 && bucketIterator.hasNext()) {
       BucketInfo bucketInfo =
@@ -104,5 +101,6 @@ public class ListBucketHandler extends Handler {
         JsonUtils.toJsonString(bucketList)));
     return null;
   }
+
 }
 

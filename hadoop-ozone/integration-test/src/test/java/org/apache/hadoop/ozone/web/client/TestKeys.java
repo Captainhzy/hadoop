@@ -44,19 +44,19 @@ import org.apache.hadoop.ozone.client.io.OzoneInputStream;
 import org.apache.hadoop.ozone.client.io.OzoneOutputStream;
 import org.apache.hadoop.ozone.client.protocol.ClientProtocol;
 import org.apache.hadoop.ozone.client.rpc.RpcClient;
-import org.apache.hadoop.ozone.container.common.helpers.KeyData;
+import org.apache.hadoop.ozone.container.common.helpers.BlockData;
 import org.apache.hadoop.ozone.container.keyvalue.KeyValueContainer;
 import org.apache.hadoop.ozone.container.keyvalue.KeyValueContainerData;
 import org.apache.hadoop.ozone.container.keyvalue.KeyValueHandler;
 import org.apache.hadoop.ozone.container.ozoneimpl.OzoneContainer;
 import org.apache.hadoop.ozone.om.OzoneManager;
+import org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes;
 import org.apache.hadoop.ozone.om.helpers.OmKeyArgs;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.OmVolumeArgs;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfo;
-import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos
-    .Status;
+
 import org.apache.hadoop.ozone.client.rest.OzoneException;
 import org.apache.hadoop.ozone.web.utils.OzoneUtils;
 import org.apache.hadoop.test.GenericTestUtils;
@@ -80,6 +80,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -136,6 +137,7 @@ public class TestKeys {
     ozoneCluster = MiniOzoneCluster.newBuilder(conf)
         .setNumDatanodes(1)
         .setHbInterval(1000)
+        .setHbProcessorInterval(1000)
         .build();
     ozoneCluster.waitForClusterToBeReady();
     client = new RpcClient(conf);
@@ -258,7 +260,8 @@ public class TestKeys {
 
       try (
           OzoneOutputStream ozoneOutputStream = bucket
-              .createKey(keyName, 0, replicationType, replicationFactor);
+              .createKey(keyName, 0, replicationType, replicationFactor,
+                  new HashMap<>());
           InputStream fileInputStream = new FileInputStream(file)) {
         IOUtils.copy(fileInputStream, ozoneOutputStream);
       }
@@ -276,56 +279,48 @@ public class TestKeys {
         getMultiPartKey(delimiter)));
   }
 
+  @SuppressWarnings("emptyblock")
   static void runTestPutKey(PutHelper helper) throws Exception {
-    final ClientProtocol client = helper.client;
+    final ClientProtocol helperClient = helper.client;
     helper.putKey();
     assertNotNull(helper.getBucket());
     assertNotNull(helper.getFile());
-    List<OzoneKey> keyList = client
+    List<OzoneKey> keyList = helperClient
         .listKeys(helper.getVol().getName(), helper.getBucket().getName(), null,
             null, 10);
     Assert.assertEquals(1, keyList.size());
 
     // test list key using a more efficient call
     String newkeyName = OzoneUtils.getRequestID().toLowerCase();
-    OzoneOutputStream ozoneOutputStream = client
+    OzoneOutputStream ozoneOutputStream = helperClient
         .createKey(helper.getVol().getName(), helper.getBucket().getName(),
-            newkeyName, 0, replicationType, replicationFactor);
+            newkeyName, 0, replicationType, replicationFactor, new HashMap<>());
     ozoneOutputStream.close();
-    keyList = client
+    keyList = helperClient
         .listKeys(helper.getVol().getName(), helper.getBucket().getName(), null,
             null, 10);
     Assert.assertEquals(2, keyList.size());
 
     // test new put key with invalid volume/bucket name
-    try {
-      ozoneOutputStream = client
-          .createKey("invalid-volume", helper.getBucket().getName(), newkeyName,
-              0, replicationType, replicationFactor);
-      ozoneOutputStream.close();
-      fail("Put key should have thrown"
-          + " when using invalid volume name.");
-    } catch (IOException e) {
-      GenericTestUtils.assertExceptionContains(
-          Status.VOLUME_NOT_FOUND.toString(), e);
-    }
+    OzoneTestUtils.expectOmException(ResultCodes.VOLUME_NOT_FOUND, () -> {
 
-    try {
-      ozoneOutputStream = client
+      try (OzoneOutputStream oos = helperClient
+          .createKey("invalid-volume", helper.getBucket().getName(), newkeyName,
+              0, replicationType, replicationFactor, new HashMap<>())) {
+      }
+    });
+
+    OzoneTestUtils.expectOmException(ResultCodes.BUCKET_NOT_FOUND, () -> {
+      try (OzoneOutputStream oos = helperClient
           .createKey(helper.getVol().getName(), "invalid-bucket", newkeyName, 0,
-              replicationType, replicationFactor);
-      ozoneOutputStream.close();
-      fail("Put key should have thrown "
-          + "when using invalid bucket name.");
-    } catch (IOException e) {
-      GenericTestUtils.assertExceptionContains(
-          Status.BUCKET_NOT_FOUND.toString(), e);
-    }
+              replicationType, replicationFactor, new HashMap<>())) {
+      }
+    });
   }
 
   private static void restartDatanode(MiniOzoneCluster cluster, int datanodeIdx)
       throws Exception {
-    cluster.restartHddsDatanode(datanodeIdx);
+    cluster.restartHddsDatanode(datanodeIdx, true);
   }
 
   @Test
@@ -379,7 +374,7 @@ public class TestKeys {
   }
 
   static void runTestPutAndGetKey(PutHelper helper) throws Exception {
-    final ClientProtocol client = helper.client;
+    final ClientProtocol helperClient = helper.client;
 
     String keyName = helper.putKey();
     assertNotNull(helper.getBucket());
@@ -425,21 +420,13 @@ public class TestKeys {
           originalHash, downloadedHash2);
 
       // test new get key with invalid volume/bucket name
-      try {
-        client.getKey("invalid-volume", helper.getBucket().getName(), keyName);
-        fail("Get key should have thrown " + "when using invalid volume name.");
-      } catch (IOException e) {
-        GenericTestUtils
-            .assertExceptionContains(Status.KEY_NOT_FOUND.toString(), e);
-      }
+      OzoneTestUtils.expectOmException(ResultCodes.KEY_NOT_FOUND,
+          () -> helperClient.getKey(
+              "invalid-volume", helper.getBucket().getName(), keyName));
 
-      try {
-        client.getKey(helper.getVol().getName(), "invalid-bucket", keyName);
-        fail("Get key should have thrown " + "when using invalid bucket name.");
-      } catch (IOException e) {
-        GenericTestUtils.assertExceptionContains(
-            Status.KEY_NOT_FOUND.toString(), e);
-      }
+      OzoneTestUtils.expectOmException(ResultCodes.KEY_NOT_FOUND,
+          () -> helperClient.getKey(
+              helper.getVol().getName(), "invalid-bucket", keyName));
     }
   }
 
@@ -457,13 +444,9 @@ public class TestKeys {
     assertNotNull(helper.getFile());
     helper.getBucket().deleteKey(keyName);
 
-    try {
+    OzoneTestUtils.expectOmException(ResultCodes.KEY_NOT_FOUND, () -> {
       helper.getBucket().getKey(keyName);
-      fail("Get Key on a deleted key should have thrown");
-    } catch (IOException ex) {
-      GenericTestUtils.assertExceptionContains(
-          Status.KEY_NOT_FOUND.toString(), ex);
-    }
+    });
   }
 
   @Test
@@ -475,7 +458,7 @@ public class TestKeys {
   }
 
   static void runTestPutAndListKey(PutHelper helper) throws Exception {
-    ClientProtocol client = helper.client;
+    ClientProtocol helperClient = helper.client;
     helper.putKey();
     assertNotNull(helper.getBucket());
     assertNotNull(helper.getFile());
@@ -485,7 +468,8 @@ public class TestKeys {
       String newkeyName = "list-key" + x;
       try (
           OzoneOutputStream ozoneOutputStream = helper.getBucket()
-              .createKey(newkeyName, 0, replicationType, replicationFactor);
+              .createKey(newkeyName, 0, replicationType, replicationFactor,
+                  new HashMap<>());
           InputStream fileInputStream = new FileInputStream(helper.getFile())) {
         IOUtils.copy(fileInputStream, ozoneOutputStream);
       }
@@ -494,7 +478,7 @@ public class TestKeys {
     List<OzoneKey> keyList1 =
         IteratorUtils.toList(helper.getBucket().listKeys(null, null));
     // test list key using a more efficient call
-    List<OzoneKey> keyList2 = client
+    List<OzoneKey> keyList2 = helperClient
         .listKeys(helper.getVol().getName(), helper.getBucket().getName(), null,
             null, 100);
 
@@ -514,7 +498,7 @@ public class TestKeys {
     }
 
     // test maxLength parameter of list keys
-    keyList2 = client
+    keyList2 = helperClient
         .listKeys(helper.getVol().getName(), helper.getBucket().getName(), null,
             null, 1);
     Assert.assertEquals(1, keyList2.size());
@@ -522,7 +506,7 @@ public class TestKeys {
     // test startKey parameter of list keys
     keyList1 = IteratorUtils
         .toList(helper.getBucket().listKeys("list-key", "list-key4"));
-    keyList2 = client
+    keyList2 = helperClient
         .listKeys(helper.getVol().getName(), helper.getBucket().getName(),
             "list-key", "list-key4", 100);
     Assert.assertEquals(5, keyList1.size());
@@ -531,7 +515,7 @@ public class TestKeys {
     // test prefix parameter of list keys
     keyList1 =
         IteratorUtils.toList(helper.getBucket().listKeys("list-key2", null));
-    keyList2 = client
+    keyList2 = helperClient
         .listKeys(helper.getVol().getName(), helper.getBucket().getName(),
             "list-key2", null, 100);
     Assert.assertTrue(
@@ -540,23 +524,15 @@ public class TestKeys {
         keyList2.size() == 1 && keyList2.get(0).getName().equals("list-key2"));
 
     // test new list keys with invalid volume/bucket name
-    try {
-      client.listKeys("invalid-volume", helper.getBucket().getName(),
+    OzoneTestUtils.expectOmException(ResultCodes.BUCKET_NOT_FOUND, () -> {
+      helperClient.listKeys("invalid-volume", helper.getBucket().getName(),
           null, null, 100);
-      fail("List keys should have thrown when using invalid volume name.");
-    } catch (IOException e) {
-      GenericTestUtils.assertExceptionContains(
-          Status.BUCKET_NOT_FOUND.toString(), e);
-    }
+    });
 
-    try {
-      client.listKeys(helper.getVol().getName(), "invalid-bucket", null,
+    OzoneTestUtils.expectOmException(ResultCodes.BUCKET_NOT_FOUND, () -> {
+      helperClient.listKeys(helper.getVol().getName(), "invalid-bucket", null,
           null, 100);
-      fail("List keys should have thrown when using invalid bucket name.");
-    } catch (IOException e) {
-      GenericTestUtils.assertExceptionContains(
-          Status.BUCKET_NOT_FOUND.toString(), e);
-    }
+    });
   }
 
   @Test
@@ -696,10 +672,10 @@ public class TestKeys {
                   .KeyValueContainer);
           KeyValueContainer container = (KeyValueContainer) cm.getContainerSet()
               .getContainer(location.getBlockID().getContainerID());
-          KeyData blockInfo = keyValueHandler
-              .getKeyManager().getKey(container, location.getBlockID());
-          KeyValueContainerData containerData = (KeyValueContainerData) container
-              .getContainerData();
+          BlockData blockInfo = keyValueHandler.getBlockManager()
+              .getBlock(container, location.getBlockID());
+          KeyValueContainerData containerData =
+              (KeyValueContainerData) container.getContainerData();
           File dataDir = new File(containerData.getChunksPath());
           for (ContainerProtos.ChunkInfo chunkInfo : blockInfo.getChunks()) {
             File chunkFile = dataDir.toPath()
